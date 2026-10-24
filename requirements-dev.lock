@@ -1,4 +1,5 @@
 # MCP v2 core + PDF + dev snapshot; desktop extras installed separately.
+# Preserve Python 3.11 support without changing the Python 3.12+ snapshot.
 annotated-types==0.8.0
 anyio==4.15.1
 attrs==26.1.0
@@ -19,8 +20,10 @@ jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 mcp==2.3.0
 mcp-types==2.3.0
-networkx==3.7
-numpy==2.5.4
+networkx==3.6.1; python_version < "3.12"
+networkx==3.7; python_version >= "3.12"
+numpy==2.4.6; python_version < "3.12"
+numpy==2.5.4; python_version >= "3.12"
 onnxruntime==1.31.0
 opentelemetry-api==1.45.1
 packaging==26.3
