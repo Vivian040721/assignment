@@ -7,8 +7,8 @@ import sys
 import httpx
 
 from paper_agent.config import Settings
-from paper_agent.sources.arxiv import ArxivSource
-from paper_agent.sources.openalex import OpenAlexSource
+from paper_agent.sources.arxiv_source import search_arxiv
+from paper_agent.sources.openalex_source import search_openalex
 
 
 async def main():
@@ -18,15 +18,15 @@ async def main():
     async with httpx.AsyncClient(
         timeout=settings.http_timeout, proxy=settings.http_proxy or None
     ) as client:
-        for source in [ArxivSource(client), OpenAlexSource(client, settings.openalex_api_key)]:
+        for name, search in [("arxiv", search_arxiv), ("openalex", search_openalex)]:
             try:
-                papers = await source.search(query, 2)
-                records[source.name] = {
+                papers = await search(query, 2, settings=settings, client=client)
+                records[name] = {
                     "count": len(papers),
                     "papers": [p.model_dump() for p in papers],
                 }
             except Exception as error:
-                records[source.name] = {"count": 0, "error": f"{type(error).__name__}: {error}"}
+                records[name] = {"count": 0, "error": f"{type(error).__name__}: {error}"}
     print(json.dumps(records, ensure_ascii=False, indent=2))
     return 0 if all(source["count"] > 0 for source in records.values()) else 1
 

@@ -1,167 +1,128 @@
-# 多源论文检索与总结 Agent
+# Paper Agent v0.2.2
 
-10 人课程小组项目的可运行开发框架。普通电脑即可启动默认演示，**不要求 24GB 显存、CUDA 或本地大模型**。
+Paper Agent 是本机运行的论文研究桌面应用。当前界面使用 **Electron + React + TypeScript + Vite**；Python 后端保留 MainAgent、MCP Client/Server、arXiv 与 OpenAlex 来源、PDF 全文处理、Selector 和 Research Analyst。renderer 只经 preload API 与 Electron 主进程通信；真实研究仍走 MainAgent → MCP Client → MCP Server，不绕过既有工具链。
 
-当前提供真实 MCP stdio 客户端/服务端、统一数据结构、两源检索适配器、去重与初排、服务内部任务 Agent 接口、全文处理、报告产出和并发实验入口。
+版本变更摘要见 [CHANGELOG](CHANGELOG.md)，交付与角色报告见[v0.2.2 交付报告](docs/v0.2.2-交付报告.md)，完整历史与证据边界见[开发日志](docs/开发日志.md)。角色与文件所有权见[分工计划](docs/分工计划.md)，接口见[架构与接口](docs/架构与接口.md)，安装/验收细节见[运行与验收](docs/运行与验收.md)。公共模型与函数规则见[开发契约](docs/开发契约.md)和[schema](docs/contracts.schema.json)。
 
-**请区分两种模式：**
+工作区支持研究与基于已有资料的讨论、会话历史、论文与报告阅读、真实工具事件、模型设置和 artifact 打开/导出。研究阶段保持来源、原始 Top-k、全文质量、候补、引用范围和部分结果可见。
 
-| 模式 | MCP 通信 | 论文与正文 | 筛选和总结 | 用途 |
-|---|---|---|---|---|
-| `demo`（默认） | 真实客户端与服务端进程 | 明确标记的合成样例 | 规则筛选、模板总结，无模型请求 | 各模块联调、验证通信与产物保存 |
-| `live` | 真实 MCP | arXiv + OpenAlex；公开全文 | 主 Agent 模型工具调用；服务内部模型筛选、总结 | 接入自己的模型配置后完成真实验收 |
+v0.2.2 重点：移除原生菜单但保留常用快捷键；运行时自由文本、错误说明和状态展示中文化；Dock 标签栏按实际宽度自适应，标签多时支持滚动和溢出菜单；论文标签绑定所属任务，切换会话后仍能读取原任务的全文/总结；活动记录改为可展开卡片并删除默认占位标签；composer 支持自增高、字数提示和实时阶段流；PDF 下载改为单候选 45 秒、单篇总预算 180 秒，避免一个慢候选耗尽整篇预算。
 
-demo 跑通不代表真实论文检索、模型效果或优化收益已验证。当前源码是开发起点；组员的后续任务见[分工看板](docs/分工看板.md)。
+## 快速开始
 
-## 快速运行
-
-需要 Python 3.11+。本机首次验收使用 Windows / Python 3.13.2。项目固定 MCP SDK **1.30.0**；不要复制 v2 的 `MCPServer` / `Client` 示例进来，升级由组长统一处理。
-
-Windows PowerShell，在项目目录执行：
+开发环境需要 Python 3.11+、Node.js 22+ 和 npm。在 Windows PowerShell 的项目根目录安装依赖：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.lock
-.\.venv\Scripts\python.exe -m pip install --no-deps -e .
-.\.venv\Scripts\python.exe -X utf8 -m paper_agent.cli --mode demo
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
-也可以执行 `scripts/setup.ps1` 完成环境安装。无需激活虚拟环境，直接使用上面的解释器路径即可。
-
-macOS / Linux：
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.lock
-.venv/bin/python -m pip install --no-deps -e .
-.venv/bin/python -m paper_agent.cli --mode demo
-```
-
-测试和静态检查：
+该脚本准备 `.venv-v2`、Python 开发/打包依赖和 root npm workspaces。手工安装：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check .
+python -m venv .venv-v2
+.\.venv-v2\Scripts\python.exe -X utf8 -m pip install -e ".[dev,packaging]"
+npm ci
 ```
 
-## 运行产物
+启动源码开发模式（Vite HMR + Electron）：
 
-每次运行使用独立目录：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\dev-desktop.ps1
+```
+
+构建 renderer/Electron 并从源码打开应用：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-desktop.ps1
+```
+
+该脚本执行 `npm run build` 后启动应用。Windows 发布包由 `scripts/build-desktop.ps1` 构建：它先打包 Python backend，再生成 electron-builder 配置的 Windows x64 NSIS 与 portable 安装包。macOS 构建和运行尚未在本轮验证。
+
+## 研究模式
+
+默认离线 Demo 使用明确标记的合成资料和响应，可在不调用真实模型的情况下核对 MCP 工具链和业务组合：
+
+```powershell
+.\.venv-v2\Scripts\python.exe -X utf8 -m paper_agent.cli --mode demo --k 5
+```
+
+Live 模式会请求真实论文来源和模型，可能产生 API 用量。配置 DeepSeek key 后再使用；OpenAlex key 可选。Demo 结果不能证明论文相关性、模型质量或真实性能提升。发生来源、全文、模型或校验错误时，系统保留 partial/failure 状态与已有产物。
+
+## 本地保存 DeepSeek 与 OpenAlex Key
+
+1. 在 [DeepSeek 开放平台](https://platform.deepseek.com/)创建/查看 DeepSeek API Key；需要 OpenAlex 个性化鉴权时，在 [OpenAlex API 设置](https://openalex.org/settings/api)查看自己的 key。
+2. 打开应用的“设置”页，在 DeepSeek API Key 中粘贴自己的 key；如要使用 OpenAlex 个性化鉴权，再填入自己的 OpenAlex key。
+3. 点击“保存设置”。默认模型为 `deepseek-flash`，API 根地址为 `https://api.deepseek.com`，thinking 默认关闭。保存只更新本机文件并显示是否已配置，不会调用模型验证，也不会回显 key。
+
+Windows 默认 data root 与配置文件为：
 
 ```text
-outputs/<run_id>/
-  run.json                  # 输入、论文、状态、逐篇覆盖、错误、耗时
-  trace.jsonl               # 来源检索、内部任务筛选、主 Agent 工具调用
-  source_arxiv.json          # 该来源的原始规范化记录
-  source_openalex.json
-  <paper_hash>.pdf           # live 模式成功下载时存在
-  <paper_hash>.md
-  <paper_hash>.summary.md
-  report.md
+data_root:   %LOCALAPPDATA%\Assignment\PaperAgent
+config file: %LOCALAPPDATA%\Assignment\PaperAgent\config.json
 ```
 
-demo 返回 `demo_completed`；真实完整流程才可能返回 `completed`；全文缺失、来源失败、总结失败或正文阅读不全均会保留 `partial`。CLI 对部分完成返回退出码 2，错误返回 1。
+文档和命令中的 key 值只用占位说明，不粘贴真实凭据。配置文件包含用户保存的密钥明文，请勿分享、提交或上传。密钥框留空会保留原值；使用设置页的 clear 操作才会清除。
 
-`pipeline_seconds` 是服务各阶段时长之和；CLI 的 `Client wall time` 还包含 MCP 进程连接与主 Agent 调用开销。比较时不要混用。
+优先级按当前实现执行：桌面 `config.json` 中已保存的字段优先于进程环境；缺少配置字段时回退环境。进程环境优先于 `.env`；非空 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` 优先于对应 `DEEPSEEK_*`。OpenAlex 使用 `OPENALEX_API_KEY`。CLI 使用进程环境和 `.env`，不读取桌面 `config.json`。
 
-## 接入真实模型与论文源
+需要另一个资料目录时，设置 `PAPER_AGENT_DESKTOP_DATA_DIR`。应用、服务和服务控制进程应使用相同值。当前打包配置不把 `.env`、`config.json` 或 user data root 加入发布资源，也不要求将密钥交给构建过程；key 在用户首次运行后写入本机资料目录。
 
-先复制配置模板，避免覆盖已有配置：
+## 任务、重连与停止
+
+Python 服务只监听 `127.0.0.1`，使用 Bearer 鉴权。renderer 不持有服务 token。窗口关闭或 Vite HMR 只断开界面，不会取消由服务持有的研究任务；重新打开会从同一 data root 读取会话、任务和事件。要终止任务，使用应用中的显式取消操作。
+
+服务停止命令：
 
 ```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-service.ps1 -Action status
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-service.ps1 -Action stop
 ```
 
-编辑 `.env`：
+有 queued/running 任务时，服务会拒绝停止。先等待任务结束，或从应用中显式取消任务；不要强制结束服务进程。原有 session/job 若缺少 `conversation_id`，仍会出现在历史中并标记 `read_only: true`；旧记录可读，但不能继续追加消息。详见[本机服务与历史接口](docs/架构与接口.md)。
 
-```dotenv
-PAPER_AGENT_MODE=live
-LLM_BASE_URL=填写支持Chat-Completions和工具调用的API根地址
-LLM_API_KEY=填写自己的密钥
-LLM_MODEL=填写供应商提供的模型名称
-OPENALEX_API_KEY=可选的免费OpenAlex密钥
-```
+## 检查与验收
 
-`LLM_BASE_URL` 不含 `/chat/completions`；代码会追加该路径。有些供应商根地址需要包含 `/v1`，按供应商文档填写。主 Agent 需要模型支持 `tools/tool_calls`。本框架通过 HTTP 适配，不绑定某个模型 SDK；是否支持具体供应商须实际验证。`.env` 和运行产物均被 Git 忽略。
-
-先验证两源，**该命令不调用模型、不下载 PDF**：
-
-如果本地网络需要代理，在 `.env` 设置 `PAPER_AGENT_HTTP_PROXY` 为现有代理地址；只用于论文源与下载，不改变系统代理或关闭证书验证。模型请求可按供应商网络条件使用标准 HTTP(S) 代理环境变量。
+本地检查命令：
 
 ```powershell
-.\.venv\Scripts\python.exe -X utf8 scripts/check_sources.py "agent memory"
+.\.venv-v2\Scripts\python.exe -X utf8 -m pytest -q
+.\.venv-v2\Scripts\python.exe -m ruff check src tests scripts
+npm run typecheck
+npm run test:frontend
+npm run test:electron
+npm run build
+npm run test:e2e
 ```
 
-真实全文处理需要额外依赖：
+较大数据量档位（40/40/30/8）使用独立的、被 Git 忽略的目录；demo 档位不调用模型，live 档位必须显式确认：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[fulltext]"
-.\.venv\Scripts\python.exe -X utf8 -m paper_agent.cli "研究长期记忆如何提高Agent工具调用可靠性" --mode live --query "agent memory tool use" --k 3
+.\.venv-v2\Scripts\python.exe -X utf8 scripts\stress_run.py --dry-run --mode demo
+.\.venv-v2\Scripts\python.exe -X utf8 scripts\stress_run.py --mode live --yes `
+  --k 8 --source-limit 40 --candidate-limit 30 --merged-limit 30 `
+  --max-llm-calls 160 --max-total-tokens 1200000 --max-chunks 10 `
+  --report-budget 128000 --download-timeout 90
 ```
 
-当前默认初排是可解释的关键词匹配。05 号可以安装 `.[semantic]` 并把 `PAPER_AGENT_RANKER` 设为 `semantic`，启用可选的 CPU SentenceTransformer；首次运行需要获取模型文件。可选依赖尚未纳入核心锁文件，集成后由组长补充统一版本。
+结果写入 `data/validation/v021/stress/<时间>/stress-summary.json`，包含每阶段耗时、真实计数、错误和 tool call 记录。demo 结果只能证明链路组合，不能证明真实论文质量或性能。
 
-## 架构与接口
+CI 执行 Python 测试/Ruff 与 npm typecheck/build/Electron Node 测试。代码通过、类型检查和自动测试不能代替已安装桌面应用的端到端交互检查，也不能替代 live 论文质量验收。
 
-```mermaid
-flowchart TD
-    U[研究想法] --> M[主 Agent / MCP 客户端]
-    M -->|三个真实 MCP 工具| S[自编 MCP 服务]
-    S --> A[arXiv]
-    S --> O[OpenAlex]
-    A --> D[统一格式 / 去重 / 初排]
-    O --> D
-    D --> T[服务内部任务 Agent 筛选]
-    T --> F[公开全文 / Markdown]
-    F --> R[服务内部任务 Agent 总结与综合报告]
-    R --> M
-```
+### 当前验收记录
 
-MCP 工具：
+| 范围 | 实际记录 |
+|---|---|
+| Python 单测 | 307 passed、3 skipped（外网检查默认跳过） |
+| Ruff | `ruff check src tests scripts` 通过 |
+| TypeScript / 构建 | `npm run typecheck`、renderer/main/preload 生产构建通过 |
+| Electron / 前端单测 | Electron 8/8；前端 layout/labels/activity/papers 8/8 |
+| 桌面 E2E（源码） | 16 项通过：菜单移除、Sidebar、Dock 溢出/缩放、活动卡片、论文跨会话恢复、输入框自增高、取消、窄窗口 |
+| 桌面 E2E（打包） | 16/16，解包版实际启动并通过完整流程 |
+| Windows 发布包 | v0.2.2 解包版已生成并通过 E2E；NSIS/portable 安装包本轮未重新生成 |
+| macOS 构建/运行 | 未验证 |
+| live 研究 | v0.2.2 小规模真实运行用于中文输出/PDF 预算核验；结果按真实失败保留为 partial，不宣称完整科研成功 |
+| live 性能结论 | 未做同输入 ≥5 轮配对基准；不提供加速比 |
 
-1. `search_and_select(idea, k=3, query="")` → 返回 `run_id`、候选、Top-k、理由、来源数量。
-2. `prepare_fulltexts(run_id)` → 返回逐篇下载/转换状态。
-3. `generate_report(run_id)` → 返回总结、综合报告路径、覆盖和耗时。
+历史真实 API 检查和 Top-1 研究的 partial 结果见[开发日志](docs/开发日志.md)；不得将它们表述为本轮生产桌面 E2E 或完整研究验收。
 
-任务 Agent 的调用入口在 `service.py` 内；主 Agent 的 live 模式由模型选择和发起工具调用，并校验工具顺序、k、原始想法与 run_id。demo 的主控制器是明确标记的固定流程。
-
-统一协议与联调约定见[接口说明](docs/接口与联调.md)，每日节点见[执行计划](docs/执行计划.md)。
-
-## 串行与并发
-
-```powershell
-.\.venv\Scripts\python.exe -m paper_agent.cli --mode demo --processing concurrent
-.\.venv\Scripts\python.exe -m evaluation.benchmark --run-json outputs/替换为实际run_id/run.json --repeats 3
-```
-
-实验入口读取固定 Markdown，交替比较串行和受限并发的**单篇总结阶段**，输出原始 CSV、输入哈希和每次总结。默认并发上限 3。demo 实验只检查接口，不得用其模板生成耗时宣称性能提升。
-
-这是实验脚手架：正式比较前需固定多个研究想法、模型与提示词、预热策略、输出质量检查和失败统计。全文转换及完整端到端时长另外记录。当前不提供预填的优化结果。
-
-## 10 人模块分配
-
-| 编号 | 主要文件 | 后续重点 |
-|---|---|---|
-| 01 组长 | `main_agent.py`、`config.py` | 验证真实模型工具调用、统一环境和每日集成 |
-| 02 | `server.py`、`service.py`、`schemas.py`、`storage.py` | 工具协议、状态与错误恢复 |
-| 03 | `sources/arxiv.py` | 查询质量、API 异常、来源记录 |
-| 04 | `sources/openalex.py` | 摘要、公开链接、额度和缺失字段 |
-| 05 | `pipeline/ranking.py` | 去重边界、CPU 语义初排、标注抽检 |
-| 06 | `agents/selector.py` | 筛选提示词、结构校验、真实相关性 |
-| 07 | `pipeline/fulltext.py` | 公开全文覆盖、转换质量、失败处理 |
-| 08 | `llm.py`、`agents/reporter.py` | 供应商适配、全文分块、证据与引用 |
-| 09 | `pipeline/parallel.py`、`evaluation/` | 冻结样例、正式对比、回归和原始数据 |
-| 10 | `cli.py`、`docs/` | 演示、README、复现、录屏与材料 |
-
-除 `evaluation/` 等入口外，业务源码均在 `src/paper_agent/`。每人用自己的功能分支；公共 schema 和依赖由 01/02 协调变更。
-
-## 尚需小组验证的事项
-
-- 真实模型的工具调用与 JSON 输出能力，供应商的超时/限流及实际 token 成本。
-- 多个研究想法下两源召回质量与任务 Agent 的相关性；目前查询规划仅为最小实现。
-- 下载链接的公开可访问性、双栏 PDF/表格等转换质量；转换失败不会自动改成摘要总结。
-- 长论文目前按字符分块，并明确记录读取覆盖；默认最多 12 块。超过上限会标记部分阅读，不算完整成功。
-- 并发在真实模型服务上的收益与输出质量；当前没有真实优化结论。
-- 当前状态存储面向一台机器、一个 MCP 服务实例。arXiv 限速跨进程需团队协调；公开部署前需另做鉴权、下载 URL 约束和多实例存储。
-
-参考：[MCP SDK](https://github.com/modelcontextprotocol/python-sdk)、[arXiv API](https://info.arxiv.org/help/api/user-manual.html)、[OpenAlex API](https://help.openalex.org/api/)、[PyMuPDF4LLM](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/)。
+v0.2.2 解包程序位于 `data/release/desktop-v022/win-unpacked/Paper Agent.exe`，包含已构建的 Python 服务。本机到 GitHub 的 TLS 不可用，`winCodeSign` 下载失败，打包使用本地 Electron 分发并关闭 EXE 资源编辑/签名；应用内 `ServiceInfo.version` 为 0.2.2，EXE 文件版本元数据仍显示 Electron 45.0.0。旧 `data/release/desktop-v021/` 和 `data/release/desktop/` 未覆盖。

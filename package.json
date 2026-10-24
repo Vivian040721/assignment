@@ -1,0 +1,38 @@
+{
+  "name": "paper-agent-desktop",
+  "version": "0.2.2",
+  "private": true,
+  "description": "Paper Agent: Electron research workspace with Python MCP",
+  "author": "Assignment Team",
+  "license": "MIT",
+  "type": "module",
+  "main": "electron/dist/main.cjs",
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev-desktop.mjs",
+    "build:renderer": "npm run build --workspace frontend",
+    "build:electron": "node scripts/build-electron.mjs",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "electron .",
+    "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p frontend/tsconfig.json --noEmit",
+    "test:electron": "node --test tests/electron/*.test.mjs",
+    "test:frontend": "node --test tests/frontend/*.test.mjs",
+    "test:e2e": "node tests/e2e/desktop.mjs",
+    "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-backend.ps1",
+    "pack": "npm run build && electron-builder --dir --config electron-builder.config.cjs",
+    "dist": "npm run build && electron-builder --config electron-builder.config.cjs",
+    "service:status": "node scripts/manage-service.mjs status",
+    "service:stop": "node scripts/manage-service.mjs stop"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "^22.19.0",
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.1"
+  }
+}
