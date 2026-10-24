@@ -4,33 +4,46 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "group-paper-agent"
-version = "0.1.0"
-description = "Ten-person MCP paper research assignment scaffold"
+version = "0.2.2"
+description = "MCP v2 multi-source paper research system"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp==1.30.0",
+    "mcp==2.3.0",
     "httpx>=0.28,<0.29",
+    "httpx2>=2.16,<3",
     "pydantic>=2.10,<3",
     "python-dotenv>=1,<2",
+    "pymupdf==1.28.2",
+    "pymupdf4llm==1.28.2",
+    "starlette>=1.9,<2",
+    "uvicorn>=0.54,<1",
 ]
 
 [project.optional-dependencies]
-fulltext = ["pymupdf4llm"]
+fulltext = []
 semantic = ["sentence-transformers"]
 dev = ["pytest>=8,<10", "ruff>=0.11"]
+packaging = ["pyinstaller==6.22.3"]
 
 [project.scripts]
 paper-agent = "paper_agent.cli:main"
 paper-mcp = "paper_agent.server:main"
+paper-service = "paper_agent.service_daemon:main"
+paper-service-control = "paper_agent.service_control:main"
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
+namespaces = false
 
 [tool.setuptools.package-data]
 paper_agent = ["fixtures/*.json", "fixtures/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["online: explicitly enabled public-network validation; skipped by default"]
 
 [tool.ruff]
 target-version = "py311"

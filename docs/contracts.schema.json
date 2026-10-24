@@ -1,13 +1,72 @@
 {
   "$defs": {
-    "PaperArtifact": {
+    "ErrorInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "stage": {
+          "title": "Stage",
+          "type": "string"
+        },
+        "paper_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paper Id"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "stage"
+      ],
+      "title": "ErrorInfo",
+      "type": "object"
+    },
+    "EvidenceReference": {
       "additionalProperties": false,
       "properties": {
         "paper_id": {
           "title": "Paper Id",
           "type": "string"
         },
-        "pdf_path": {
+        "page_number": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        },
+        "section": {
           "anyOf": [
             {
               "type": "string"
@@ -17,9 +76,9 @@
             }
           ],
           "default": null,
-          "title": "Pdf Path"
+          "title": "Section"
         },
-        "markdown_path": {
+        "quote": {
           "anyOf": [
             {
               "type": "string"
@@ -29,9 +88,9 @@
             }
           ],
           "default": null,
-          "title": "Markdown Path"
+          "title": "Quote"
         },
-        "summary_path": {
+        "claim": {
           "anyOf": [
             {
               "type": "string"
@@ -41,51 +100,68 @@
             }
           ],
           "default": null,
-          "title": "Summary Path"
+          "title": "Claim"
         },
-        "fulltext_status": {
-          "default": "pending",
+        "evidence_type": {
+          "default": "author_claim",
           "enum": [
-            "pending",
-            "ready",
-            "demo_fixture",
-            "failed"
+            "author_claim",
+            "system_inference",
+            "research_idea"
           ],
-          "title": "Fulltext Status",
-          "type": "string"
-        },
-        "failure_reason": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Failure Reason"
-        },
-        "evidence_coverage": {
-          "default": "not_read",
-          "title": "Evidence Coverage",
+          "title": "Evidence Type",
           "type": "string"
         }
       },
       "required": [
         "paper_id"
       ],
-      "title": "PaperArtifact",
+      "title": "EvidenceReference",
       "type": "object"
     },
-    "PaperRecord": {
+    "PageMapping": {
+      "additionalProperties": false,
+      "description": "One-based PDF page with offsets into the persisted Markdown text.",
+      "properties": {
+        "page_number": {
+          "minimum": 1,
+          "title": "Page Number",
+          "type": "integer"
+        },
+        "text": {
+          "default": "",
+          "title": "Text",
+          "type": "string"
+        },
+        "start_char": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Start Char",
+          "type": "integer"
+        },
+        "end_char": {
+          "default": 0,
+          "minimum": 0,
+          "title": "End Char",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_number"
+      ],
+      "title": "PageMapping",
+      "type": "object"
+    },
+    "Paper": {
       "additionalProperties": false,
       "properties": {
         "paper_id": {
+          "minLength": 1,
           "title": "Paper Id",
           "type": "string"
         },
         "title": {
+          "minLength": 1,
           "title": "Title",
           "type": "string"
         },
@@ -99,6 +175,8 @@
         "year": {
           "anyOf": [
             {
+              "maximum": 9999,
+              "minimum": 1000,
               "type": "integer"
             },
             {
@@ -137,29 +215,7 @@
           "default": null,
           "title": "Arxiv Id"
         },
-        "sources": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Sources",
-          "type": "array"
-        },
-        "source_records": {
-          "items": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "title": "Source Records",
-          "type": "array"
-        },
-        "landing_url": {
-          "default": "",
-          "title": "Landing Url",
-          "type": "string"
-        },
-        "oa_pdf_url": {
+        "arxiv_version": {
           "anyOf": [
             {
               "type": "string"
@@ -169,48 +225,508 @@
             }
           ],
           "default": null,
-          "title": "Oa Pdf Url"
+          "title": "Arxiv Version"
         },
-        "base_score": {
-          "default": 0,
-          "title": "Base Score",
-          "type": "number"
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "source_records": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Source Records",
+          "type": "array"
+        },
+        "paper_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paper Url"
+        },
+        "pdf_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pdf Url"
+        },
+        "pdf_urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Pdf Urls",
+          "type": "array"
+        },
+        "citation_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Citation Count"
+        },
+        "initial_score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Initial Score"
+        },
+        "final_score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Final Score"
+        },
+        "rank": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rank"
+        },
+        "selection_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selection Reason"
+        },
+        "ranking_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ranking Reason"
+        },
+        "ranking_details": {
+          "additionalProperties": true,
+          "title": "Ranking Details",
+          "type": "object"
+        },
+        "pdf_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pdf Path"
+        },
+        "markdown_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Markdown Path"
+        },
+        "page_map": {
+          "items": {
+            "$ref": "#/$defs/PageMapping"
+          },
+          "title": "Page Map",
+          "type": "array"
+        },
+        "fulltext_quality": {
+          "additionalProperties": true,
+          "title": "Fulltext Quality",
+          "type": "object"
+        },
+        "status": {
+          "default": "metadata_only",
+          "title": "Status",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ErrorInfo"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
         }
       },
       "required": [
         "paper_id",
         "title"
       ],
-      "title": "PaperRecord",
+      "title": "Paper",
       "type": "object"
     },
-    "SelectedPaper": {
+    "PaperReference": {
       "additionalProperties": false,
       "properties": {
         "paper_id": {
           "title": "Paper Id",
           "type": "string"
         },
-        "rank": {
-          "title": "Rank",
-          "type": "integer"
-        },
-        "selection_reason": {
-          "title": "Selection Reason",
+        "title": {
+          "title": "Title",
           "type": "string"
         },
-        "selection_basis": {
-          "default": "title_abstract",
-          "title": "Selection Basis",
-          "type": "string"
+        "paper_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paper Url"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
         }
       },
       "required": [
         "paper_id",
-        "rank",
-        "selection_reason"
+        "title"
       ],
-      "title": "SelectedPaper",
+      "title": "PaperReference",
+      "type": "object"
+    },
+    "PaperSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "paper_id": {
+          "title": "Paper Id",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "summary_scope": {
+          "default": "abstract_only",
+          "enum": [
+            "fulltext",
+            "partial_fulltext",
+            "abstract_only",
+            "failed",
+            "demo_fixture"
+          ],
+          "title": "Summary Scope",
+          "type": "string"
+        },
+        "research_question": {
+          "default": "",
+          "title": "Research Question",
+          "type": "string"
+        },
+        "core_idea": {
+          "default": "",
+          "title": "Core Idea",
+          "type": "string"
+        },
+        "methods": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Methods",
+          "type": "array"
+        },
+        "experiments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Experiments",
+          "type": "array"
+        },
+        "findings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Findings",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "relevance": {
+          "default": "",
+          "title": "Relevance",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceReference"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "author_claims": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Author Claims",
+          "type": "array"
+        },
+        "system_inferences": {
+          "items": {
+            "type": "string"
+          },
+          "title": "System Inferences",
+          "type": "array"
+        },
+        "speculative_ideas": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Speculative Ideas",
+          "type": "array"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        },
+        "summary_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary Path"
+        },
+        "markdown": {
+          "default": "",
+          "title": "Markdown",
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ErrorInfo"
+          },
+          "title": "Errors",
+          "type": "array"
+        }
+      },
+      "required": [
+        "paper_id"
+      ],
+      "title": "PaperSummary",
+      "type": "object"
+    },
+    "ResearchReport": {
+      "additionalProperties": false,
+      "properties": {
+        "idea": {
+          "title": "Idea",
+          "type": "string"
+        },
+        "overview": {
+          "default": "",
+          "title": "Overview",
+          "type": "string"
+        },
+        "related_work": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Work",
+          "type": "array"
+        },
+        "comparison": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Comparison",
+          "type": "array"
+        },
+        "researched_questions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Researched Questions",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "research_directions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Research Directions",
+          "type": "array"
+        },
+        "references": {
+          "items": {
+            "$ref": "#/$defs/PaperReference"
+          },
+          "title": "References",
+          "type": "array"
+        },
+        "report_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Report Path"
+        },
+        "markdown": {
+          "default": "",
+          "title": "Markdown",
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ErrorInfo"
+          },
+          "title": "Errors",
+          "type": "array"
+        }
+      },
+      "required": [
+        "idea"
+      ],
+      "title": "ResearchReport",
+      "type": "object"
+    },
+    "StageTiming": {
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "title": "Stage",
+          "type": "string"
+        },
+        "duration_seconds": {
+          "minimum": 0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "request_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Request Count",
+          "type": "integer"
+        },
+        "success_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Success Count",
+          "type": "integer"
+        },
+        "error_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Error Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stage",
+        "duration_seconds"
+      ],
+      "title": "StageTiming",
       "type": "object"
     }
   },
@@ -220,7 +736,24 @@
       "title": "Run Id",
       "type": "string"
     },
+    "idea": {
+      "title": "Idea",
+      "type": "string"
+    },
+    "query": {
+      "default": "",
+      "title": "Query",
+      "type": "string"
+    },
+    "queries": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Queries",
+      "type": "array"
+    },
     "mode": {
+      "default": "live",
       "enum": [
         "demo",
         "live"
@@ -228,26 +761,53 @@
       "title": "Mode",
       "type": "string"
     },
-    "input_idea": {
-      "title": "Input Idea",
-      "type": "string"
-    },
-    "query": {
-      "title": "Query",
+    "execution_mode": {
+      "default": "sequential",
+      "enum": [
+        "sequential",
+        "concurrent"
+      ],
+      "title": "Execution Mode",
       "type": "string"
     },
     "top_k": {
+      "default": 5,
+      "maximum": 100,
+      "minimum": 1,
       "title": "Top K",
       "type": "integer"
     },
-    "processing": {
-      "default": "serial",
-      "enum": [
-        "serial",
-        "concurrent"
+    "papers": {
+      "items": {
+        "$ref": "#/$defs/Paper"
+      },
+      "title": "Papers",
+      "type": "array"
+    },
+    "selected_papers": {
+      "items": {
+        "$ref": "#/$defs/Paper"
+      },
+      "title": "Selected Papers",
+      "type": "array"
+    },
+    "summaries": {
+      "items": {
+        "$ref": "#/$defs/PaperSummary"
+      },
+      "title": "Summaries",
+      "type": "array"
+    },
+    "report": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResearchReport"
+        },
+        {
+          "type": "null"
+        }
       ],
-      "title": "Processing",
-      "type": "string"
+      "default": null
     },
     "source_counts": {
       "additionalProperties": {
@@ -256,43 +816,31 @@
       "title": "Source Counts",
       "type": "object"
     },
-    "merged_count": {
-      "default": 0,
-      "title": "Merged Count",
-      "type": "integer"
-    },
-    "dedup_count": {
-      "default": 0,
-      "title": "Dedup Count",
-      "type": "integer"
-    },
-    "candidate_count": {
-      "default": 0,
-      "title": "Candidate Count",
-      "type": "integer"
-    },
-    "candidates": {
+    "timings": {
       "items": {
-        "$ref": "#/$defs/PaperRecord"
+        "$ref": "#/$defs/StageTiming"
       },
-      "title": "Candidates",
+      "title": "Timings",
       "type": "array"
     },
-    "selected_papers": {
+    "errors": {
       "items": {
-        "$ref": "#/$defs/SelectedPaper"
+        "$ref": "#/$defs/ErrorInfo"
       },
-      "title": "Selected Papers",
+      "title": "Errors",
       "type": "array"
     },
-    "artifacts": {
-      "items": {
-        "$ref": "#/$defs/PaperArtifact"
-      },
-      "title": "Artifacts",
-      "type": "array"
+    "metrics": {
+      "additionalProperties": true,
+      "title": "Metrics",
+      "type": "object"
     },
-    "report_path": {
+    "status": {
+      "default": "pending",
+      "title": "Status",
+      "type": "string"
+    },
+    "output_dir": {
       "anyOf": [
         {
           "type": "string"
@@ -302,42 +850,12 @@
         }
       ],
       "default": null,
-      "title": "Report Path"
-    },
-    "timings": {
-      "additionalProperties": {
-        "type": "number"
-      },
-      "title": "Timings",
-      "type": "object"
-    },
-    "status": {
-      "enum": [
-        "selected",
-        "fulltexts_ready",
-        "partial",
-        "completed",
-        "demo_completed"
-      ],
-      "title": "Status",
-      "type": "string"
-    },
-    "errors": {
-      "items": {
-        "type": "string"
-      },
-      "title": "Errors",
-      "type": "array"
+      "title": "Output Dir"
     }
   },
   "required": [
-    "run_id",
-    "mode",
-    "input_idea",
-    "query",
-    "top_k",
-    "status"
+    "idea"
   ],
-  "title": "RunResult",
+  "title": "PipelineResult",
   "type": "object"
 }

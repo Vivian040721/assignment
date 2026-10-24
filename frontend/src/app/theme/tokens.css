@@ -1,0 +1,168 @@
+:root {
+  color-scheme: light;
+
+  --canvas: #f5f3ee;
+  --surface: #fffefb;
+  --surface-raised: #ffffff;
+  --surface-soft: #f8f5ef;
+  --surface-sunken: #f0ede6;
+  --sidebar: #f1eee7;
+  --dock: #fbf9f4;
+
+  --ink: #282520;
+  --ink-soft: #46413a;
+  --ink-muted: #6a6358;
+  --ink-faint: #7c7569;
+
+  --line: #e2ddd3;
+  --line-soft: #ebe7de;
+  --line-strong: #c9c2b4;
+  --line-control: #968f81;
+
+  --accent: #9a5b3d;
+  --on-accent: #fffefb;
+  --accent-ink: #7a4630;
+  --accent-dark: #8a4a2e;
+  --accent-dark-hover: #743d25;
+  --accent-wash: #f6ebe4;
+  --accent-muted: #b9a079;
+
+  --focus: #8a5a3f;
+  --focus-ring: rgba(138, 90, 63, .2);
+  --selection: #e7d9c9;
+  --selection-ink: #31281f;
+
+  --scroll-thumb: #cbc4b8;
+  --scroll-thumb-hover: #aaa294;
+
+  --success: #3f6b52;
+  --success-wash: #e8f0ea;
+  --warning: #8a5a2b;
+  --warning-ink: #7c552f;
+  --warning-wash: #f8f0e4;
+  --warning-line: #e8d9c2;
+  --danger: #9f4b3d;
+  --danger-wash: #f8ece9;
+  --danger-line: #e8d0ca;
+  --disabled-bg: #b8b1a6;
+
+  --sidebar-hover: #e8e5dd;
+  --sidebar-active: #e3ded3;
+  --user-bubble: #f1eee6;
+  --composer-border: #d3ccbf;
+
+  --markdown-ink: #3d372e;
+  --markdown-quote: #726654;
+  --markdown-border: #b9a88e;
+  --markdown-code-ink: #554635;
+  --markdown-link: #7a5238;
+  --markdown-link-underline: #bba58a;
+  --markdown-link-hover: #4c3826;
+  --code-bg: #f0ede6;
+
+  --event-dot: #b2a48d;
+  --skeleton-base: #ece8e0;
+  --skeleton-shine: #f5f2ec;
+  --benchmark-sequential: #9e8a70;
+  --benchmark-concurrent: #c8a77f;
+
+  --shadow-xs: 0 1px 2px rgba(57, 43, 25, .06);
+  --shadow-sm: 0 2px 9px rgba(52, 41, 22, .05);
+  --shadow-md: 0 8px 28px rgba(51, 38, 22, .12);
+  --shadow-lg: 0 18px 48px rgba(45, 33, 18, .16);
+
+  --font-ui: Inter, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-reading: Georgia, "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --font-mono: "Cascadia Code", Consolas, "Courier New", monospace;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-control: 8px;
+
+  --motion-instant: 0ms;
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-mid: 200ms;
+  --motion-slow: 240ms;
+  --ease-standard: cubic-bezier(.2, .7, .2, 1);
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --canvas: #161513;
+    --surface: #1e1c1a;
+    --surface-raised: #282522;
+    --surface-soft: #24211e;
+    --surface-sunken: #141311;
+    --sidebar: #1a1917;
+    --dock: #1c1a18;
+
+    --ink: #eee9e1;
+    --ink-soft: #d4cdc2;
+    --ink-muted: #aaa296;
+    --ink-faint: #948c80;
+
+    --line: #37322c;
+    --line-soft: #2b2824;
+    --line-strong: #514a41;
+    --line-control: #6f675c;
+
+    --accent: #d39a73;
+    --on-accent: #1c1410;
+    --accent-ink: #e6b994;
+    --accent-dark: #c9855d;
+    --accent-dark-hover: #d99a72;
+    --accent-wash: #31261f;
+    --accent-muted: #a88262;
+
+    --focus: #d8a27b;
+    --focus-ring: rgba(216, 162, 123, .24);
+    --selection: #4a3a2d;
+    --selection-ink: #fff9f0;
+
+    --scroll-thumb: #4a443c;
+    --scroll-thumb-hover: #6b6257;
+
+    --success: #8fc4a4;
+    --success-wash: #203026;
+    --warning: #d9ae74;
+    --warning-ink: #dfb37a;
+    --warning-wash: #30261b;
+    --warning-line: #4c3b28;
+    --danger: #e09280;
+    --danger-wash: #33211e;
+    --danger-line: #573430;
+    --disabled-bg: #5a544c;
+
+    --sidebar-hover: #26231f;
+    --sidebar-active: #302b25;
+    --user-bubble: #2b2723;
+    --composer-border: #4a433a;
+
+    --markdown-ink: #e3dcd2;
+    --markdown-quote: #b9ac9a;
+    --markdown-border: #7c6a55;
+    --markdown-code-ink: #e6cdb8;
+    --markdown-link: #e0ad86;
+    --markdown-link-underline: #8a6a50;
+    --markdown-link-hover: #f0c9a8;
+    --code-bg: #26221e;
+
+    --event-dot: #7c6d5b;
+    --skeleton-base: #282420;
+    --skeleton-shine: #332e29;
+    --benchmark-sequential: #b29a7d;
+    --benchmark-concurrent: #d3b18a;
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, .24);
+    --shadow-sm: 0 2px 10px rgba(0, 0, 0, .24);
+    --shadow-md: 0 10px 30px rgba(0, 0, 0, .34);
+    --shadow-lg: 0 20px 52px rgba(0, 0, 0, .42);
+  }
+}

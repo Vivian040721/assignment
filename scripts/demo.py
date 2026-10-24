@@ -1,0 +1,6 @@
+"""Thin convenience wrapper; fixtures and results live under ignored data/."""
+
+from paper_agent.cli import main
+
+if __name__ == "__main__":
+    main()
