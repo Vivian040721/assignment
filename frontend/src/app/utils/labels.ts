@@ -8,7 +8,7 @@ const statuses: Record<string, string> = {
   searching: '检索中',
   searched: '检索完成',
   selected: '已筛选',
-  fulltexts_ready: '全文已就绪',
+  fulltexts_ready: '全文处理已结束',
   summarized: '总结完成',
   demo_completed: '演示完成',
   pending: '等待中',
@@ -25,10 +25,13 @@ const stages: Record<string, string> = {
   download: '全文下载',
   convert: 'PDF 正文提取',
   fulltexts: '全文准备',
+  fulltext_paper: '单篇全文处理',
   summarize: '总结',
   report: '报告',
   search: '检索',
   selection: '筛选',
+  semantic_ranker: '语义排序',
+  ranking: '候选排序',
   total: '总计',
   arxiv_search: 'arXiv 检索',
   openalex_search: 'OpenAlex 检索',
@@ -160,4 +163,41 @@ export function errorLabel(item: { code?: string | null; message?: string | null
 export function paperErrorLabel(paper: { error?: string | null; errors?: Array<{ code?: string; message?: string }> }): string {
   if (paper.errors?.length) return errorLabel(paper.errors[0]);
   return paper.error ?? '';
+}
+
+const fallbackReasons: Record<string, string> = {
+  dependency_missing: '语义排序依赖未安装，实际使用关键词排序。',
+  model_load_failed: '语义模型加载失败，实际使用关键词排序。',
+  embedding_failed: '语义向量计算失败，实际使用关键词排序。',
+  empty_query: '检索词为空，实际使用关键词排序。',
+  no_candidates: '没有可重排的候选论文。',
+  semantic_rerank_failed: '语义排序发生异常，实际使用关键词排序。',
+};
+
+export function rankingFallbackLabel(reason?: string | null): string {
+  if (!reason) return '';
+  return fallbackReasons[reason] ?? `语义排序已降级（${reason}）。`;
+}
+
+const errorHints: Record<string, string> = {
+  no_open_access: '可以核对论文是否有其他公开版本；当前论文会保留为未分析。',
+  access_unavailable: '出版方未提供可下载的公开 PDF；可检查其他开放版本。',
+  download_timeout: '下载预算已用尽；可稍后重试或查看候选地址。',
+  candidate_timeout: '已按顺序尝试其他 PDF 候选。',
+  partial_extraction: '当前只按可验证的部分全文处理，不会标成完整全文。',
+  conversion_failed: 'PDF 已保留，但正文提取失败；可展开错误详情核对。',
+  invalid_model_output: '展开错误详情查看字段或证据定位；已成功校验的内容会保留。',
+  partial_summary: '只有成功读取并校验的分块进入总结，未读部分不会计入。',
+  partial_report: '报告只使用实际可用的单篇总结，缺失论文不会被补写。',
+  llm_budget: '检查模型输入或请求预算；缩小 Top-k 后重新发起也是一种选择。',
+  llm_failed: '检查模型连接与配置；本次不会自动重复计费请求。',
+  selector_fallback: '筛选已按配置降级，请查看筛选审计与原因。',
+  selector_invalid_output: '筛选输出未通过结构校验；可查看活动记录中的筛选错误。',
+  translation_required: '请提供英文检索词，或在设置中配置可用的翻译模型。',
+  persist_failed: '检查数据目录写入权限和磁盘空间。',
+};
+
+export function errorHint(code?: string | null): string {
+  if (!code) return '';
+  return errorHints[code] ?? '展开错误详情查看阶段和定位信息。';
 }

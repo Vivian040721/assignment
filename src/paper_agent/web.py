@@ -641,7 +641,8 @@ class Workbench:
                 item = json.loads(line)
             except ValueError:
                 break
-            self.event(job, "trace", stage=item.get("stage", ""), data=item)
+            message = item.get("message") if isinstance(item.get("message"), str) else ""
+            self.event(job, "trace", stage=item.get("stage", ""), message=message, data=item)
             count += 1
         job["_trace_lines"] = count
 

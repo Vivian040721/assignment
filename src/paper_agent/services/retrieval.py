@@ -234,6 +234,7 @@ def merge_dedupe_rank(papers: list[Paper], idea: str) -> list[Paper]:
     results.sort(key=lambda p: (-(p.initial_score or 0), _title(p.title), -(p.year or 0), p.paper_id))
     for rank, paper in enumerate(results, 1):
         paper.rank = rank
+        paper.ranking_details["keyword_rank"] = rank
     return results
 
 

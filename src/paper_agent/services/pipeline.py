@@ -24,6 +24,7 @@ from paper_agent.models import ErrorInfo, Paper, PaperSummary, PipelineResult, S
 from paper_agent.services.downloader import download_pdf
 from paper_agent.services.pdf_converter import convert_pdf
 from paper_agent.services.retrieval import merge_dedupe_rank, plan_queries
+from paper_agent.services.semantic_reranker import semantic_rerank
 from paper_agent.sources.arxiv_source import search_arxiv
 from paper_agent.sources.openalex_source import search_openalex
 from paper_agent.storage import PipelineStore
@@ -255,8 +256,35 @@ class ResearchPipeline:
         run.metrics["retrieved_count"] = sum(run.source_counts.values())
         run.metrics["unique_count"] = len(ranked)
         run.metrics["merged_count"] = len(ranked)
+        # Semantic fusion must see every deduplicated candidate. Truncation is
+        # deliberately applied only after the complete RRF order is known.
+        if self.settings.ranker == "semantic":
+            self.store.event(run.run_id, "semantic_ranker", event="start",
+                             requested_ranker="semantic", candidate_count=len(ranked))
+            ranked, ranking_audit = await semantic_rerank(ranking_query, ranked)
+            self.store.event(
+                run.run_id, "semantic_ranker",
+                event="finish" if ranking_audit.get("actual_ranker") == "semantic" else "fallback",
+                requested_ranker="semantic",
+                actual_ranker=ranking_audit.get("actual_ranker"),
+                model_name=ranking_audit.get("model_name"),
+                fallback_reason=ranking_audit.get("fallback_reason"),
+                message=ranking_audit.get("fallback_message") or "语义排序完成。",
+                candidate_count=len(ranked),
+                duration_seconds=ranking_audit.get("duration_seconds"),
+            )
+        else:
+            ranking_audit = {
+                "requested_ranker": "keyword", "actual_ranker": "keyword",
+                "model_name": None, "fallback_reason": None, "fallback_message": None,
+                "candidate_count": len(ranked), "encoded_count": 0, "cache_hits": 0,
+                "duration_seconds": 0.0,
+            }
+        ranking_audit["candidate_count_before_truncation"] = len(ranked)
         if self.settings.merged_candidate_limit:
             ranked = ranked[:max(self.settings.merged_candidate_limit, k)]
+        ranking_audit["candidate_count_after_truncation"] = len(ranked)
+        run.metrics["ranking"] = ranking_audit
         run.papers = ranked
         run.metrics["downstream_candidate_count"] = len(ranked)
         count = sum(run.metrics["source_requests"].values())

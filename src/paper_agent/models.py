@@ -104,6 +104,8 @@ class PaperSummary(Record):
     paper_id: str
     title: str = ""
     summary_scope: SummaryScope = "abstract_only"
+    overview: str = ""
+    deep_analysis: str = ""
     research_question: str = ""
     core_idea: str = ""
     methods: list[str] = Field(default_factory=list)

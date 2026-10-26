@@ -29,6 +29,9 @@ Give a single final_score in [0, 1] reflecting these dimensions. Prefer direct
 evidence over popularity or recency alone. Missing abstracts reduce confidence.
 Open-access/PDF availability is retrieval metadata, NOT academic relevance; do not
 reward downloadability or discard a more relevant paper just because its PDF is absent.
+When a candidate includes a ranking object, keyword_rank, semantic_rank and rrf_rank are
+one-based ordering evidence. rrf_score and cosine_similarity are ranking signals, never
+probabilities; use them only as context and still judge topical/method relevance yourself.
 Return exactly requested_count candidates, using unique consecutive ranks starting at 1 and
 nonincreasing final_score. Break exact score ties consistently by candidate order.
 Return exactly one JSON object with no extra fields:
@@ -90,21 +93,28 @@ def build_selection_payload(
     cap, found by binary search; titles/IDs/idea are never silently truncated.
     If required metadata alone exceeds the budget, fail before making a request.
     """
-    records = [
-        {
+    records = []
+    for p in candidates:
+        details = p.ranking_details
+        ranking = {
+            key: details[key]
+            for key in ("ranker", "keyword_rank", "semantic_rank", "cosine_similarity",
+                        "rrf_rank", "rrf_score", "model_name")
+            if details.get(key) is not None
+        }
+        records.append({
             "paper_id": p.paper_id,
             "title": p.title,
             "abstract": "",
             "year": p.year,
             "sources": p.sources,
             "initial_score": p.initial_score,
+            **({"ranking": ranking} if ranking else {}),
             "open_access": {
                 "pdf_url_available": bool(p.pdf_url or p.pdf_urls),
                 "note": "Known PDF URL only; public accessibility has not been verified",
             },
-        }
-        for p in candidates
-    ]
+        })
     payload = {
         "idea": idea,
         "requested_count": min(k, len(candidates)),

@@ -4,10 +4,11 @@ import type { Artifact, Job } from '../../../types/contracts';
 import type { LayoutTab } from '../../../types/ui';
 import { desktopApi } from '../../../services/desktopApi';
 import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStore';
-import { collectPapers, paperStatusLabel, summaryScopeLabel } from '../../../utils/papers';
+import { collectPapers, isTerminalResult, isTerminalStatus, paperStatusLabel, scoreShort, summaryScopeLabel } from '../../../utils/papers';
 import { safeHttpUrl } from '../../../utils/format';
-import { errorLabel, paperErrorLabel } from '../../../utils/labels';
+import { errorHint, errorLabel, paperErrorLabel } from '../../../utils/labels';
 import { MarkdownContent } from '../common/MarkdownContent';
+import { PaperProgress, PaperRankingDetails } from '../common/ResultInsights';
 
 type ReaderView = 'summary' | 'fulltext';
 
@@ -86,10 +87,16 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
   const hasSummary = Boolean(summary?.markdown);
   const hasFulltext = Boolean(markdownArtifact);
   const readingText = view === 'summary'
-    ? summary?.markdown || ''
+    ? (summary?.deep_analysis?.trim() || summary?.markdown || '')
     : fulltext ?? (hasFulltext ? '' : `## 摘要\n\n${paper.abstract || '当前结果没有提供论文摘要。'}\n\n> 当前没有返回可读取的全文。`);
   const sourceUrl = safeHttpUrl(paper.paper_url);
-  const score = paper.final_score ?? paper.initial_score;
+  const selected = Boolean(collection.result?.selected_papers.some(item => item.paper_id === paper.paper_id));
+  const terminal = job ? isTerminalStatus(job.status) : isTerminalResult(collection.result);
+  const summaryErrors = summary?.errors ?? [];
+  const paperErrors = paper.errors ?? [];
+  const summaryOverview = summary
+    ? (summary.overview?.trim() || summary.core_idea?.trim() || summary.relevance?.trim() || '')
+    : '';
   const copy = async () => {
     if (!readingText) return;
     try {
@@ -120,47 +127,46 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
     <header className="reader-header">
       <div className="reader-icon"><BookOpen size={17}/></div>
       <div className="reader-title">
-        <span>{summary?.summary_scope ? summaryScopeLabel(summary.summary_scope) : paperStatusLabel(paper.status)}</span>
+        <span>{summary?.summary_scope
+          ? `${summaryScopeLabel(summary.summary_scope)}${summaryErrors.length ? ' · 校验有错误' : ''}`
+          : paperStatusLabel(paper.status)}</span>
         <h2>{paper.title}</h2>
         <p>{paper.authors.join(', ')}{paper.year ? ` · ${paper.year}` : ''}</p>
         <div className="paper-tags">
           <span>{paperStatusLabel(paper.status)}</span>
-          {typeof score === 'number' && Number.isFinite(score) ? <span>相关度 {Math.round(score * 100)}%</span> : null}
-          {typeof paper.rank === 'number' ? <span>排名 #{paper.rank}</span> : null}
-          {paper.pdf_path ? <span>PDF 已缓存</span> : null}
-          {paper.markdown_path ? <span>Markdown 就绪</span> : null}
+          <span>{scoreShort(paper)}</span>
+          {typeof paper.rank === 'number' ? <span>{selected ? 'LLM 入选' : '候选'}名次 #{paper.rank}</span> : null}
+          {paper.pdf_path ? <span>PDF 已保存</span> : null}
+          {paper.markdown_path ? <span>{paper.fulltext_quality?.complete === true ? '完整 Markdown' : '部分 Markdown'}</span> : null}
         </div>
       </div>
     </header>
-    {paper.selection_reason ? <div className="scope-note"><span>入选依据</span><strong>{paper.selection_reason}</strong></div> : null}
-    {summary && <div className="scope-note"><span>总结范围</span><strong>{summaryScopeLabel(summary.summary_scope)}</strong>{summary.warnings?.length ? <span>{summary.warnings.join(' · ')}</span> : null}</div>}
+    <PaperProgress paper={paper} summary={summary} result={collection.result} terminal={terminal}/>
+    {paper.selection_reason ? <div className="scope-note"><span>LLM 入选依据</span><strong>{paper.selection_reason}</strong></div> : null}
+    {summaryOverview && <section className="summary-overview" aria-label="全文概览">
+      <span>全文概览</span>
+      <p>{summaryOverview}</p>
+    </section>}
+    <PaperRankingDetails paper={paper} selected={selected}/>
+    {summaryErrors.length ? <details className="reader-diagnostics is-error">
+      <summary>校验状态（{summaryErrors.length}）</summary>
+      <ul>{summaryErrors.map((error, index) => <li key={`${error.code ?? 'error'}:${index}`}><strong>{errorLabel(error)}</strong><span>{errorHint(error.code)}{error.code ? ` · ${error.code}` : ''}</span></li>)}</ul>
+    </details> : null}
     {hasSummary && hasFulltext && <div className="reader-switch" role="tablist" aria-label={`${paper.title} 阅读视图`}>
-      <button type="button" role="tab" aria-selected={view === 'summary'} className={view === 'summary' ? 'is-active' : ''} onClick={() => setView('summary')}>单篇总结</button>
-      <button type="button" role="tab" aria-selected={view === 'fulltext'} className={view === 'fulltext' ? 'is-active' : ''} onClick={() => setView('fulltext')}>全文</button>
+      <button type="button" role="tab" aria-selected={view === 'summary'} className={view === 'summary' ? 'is-active' : ''} onClick={() => setView('summary')}>单篇报告</button>
+      <button type="button" role="tab" aria-selected={view === 'fulltext'} className={view === 'fulltext' ? 'is-active' : ''} onClick={() => setView('fulltext')}>全文阅读</button>
     </div>}
     <div className="reader-actions">
       <button className="subtle-button" type="button" disabled={!readingText} onClick={() => void copy()}><Copy size={14}/>复制</button>
+      {hasFulltext && <button className="subtle-button" type="button" onClick={() => setView('fulltext')}><BookOpen size={14}/>阅读全文</button>}
       {pdfArtifact && <button className="subtle-button" type="button" onClick={() => void openArtifact(pdfArtifact)}><FileDown size={14}/>打开 PDF</button>}
       {sourceUrl && <button className="subtle-button" type="button" onClick={() => void openSource()}><ArrowUpRight size={14}/>原文链接</button>}
     </div>
-    {view === 'summary' && summary && <SummaryFacts summary={summary}/>}
+    {view === 'fulltext' && hasFulltext && <p className="fulltext-source-note">全文由 PyMuPDF4LLM 从 PDF 提取并保存为 Markdown，可直接在应用内阅读。</p>}
     {loading ? <div className="reader-loading" aria-live="polite"><span className="skeleton-line wide"/><span className="skeleton-line"/><span className="skeleton-line medium"/><span className="skeleton-line wide"/></div> : readingText ? <MarkdownContent text={readingText}/> : null}
     {truncated && <div className="inline-warning" role="status">全文超过 2 MiB，当前仅显示服务端返回的截断内容。</div>}
     {localError && <div className="inline-error" role="alert">全文读取失败：{localError}</div>}
-    {paper.errors?.length ? <div className="inline-warning" role="status">{paper.errors.map((item, index) => <span key={`${item.code ?? 'error'}:${index}`}>{errorLabel(item)}{index < (paper.errors?.length ?? 0) - 1 ? '；' : ''}</span>)}</div> : paperErrorLabel(paper) ? <div className="inline-warning" role="status">{paperErrorLabel(paper)}</div> : null}
+    {paperErrors.length ? <div className="inline-warning" role="status">{paperErrors.map((item, index) => <span key={`${item.code ?? 'error'}:${index}`}>{errorLabel(item)}{index < paperErrors.length - 1 ? '；' : ''}</span>)}</div> : paperErrorLabel(paper) ? <div className="inline-warning" role="status">{paperErrorLabel(paper)}</div> : null}
     {!summary && !markdownArtifact && <p className="reader-limitation">服务端未返回这篇论文的全文文件。此处只显示实际提供的摘要，不会将摘要标成全文。</p>}
   </article>;
-}
-
-function SummaryFacts({ summary }: { summary: NonNullable<ReturnType<typeof collectPapers>['summaries'][number]> }) {
-  const sections = [
-    ['核心思想', summary.core_idea],
-    ['方法', summary.methods?.join('；')],
-    ['实验', summary.experiments?.join('；')],
-    ['主要发现', summary.findings?.join('；')],
-    ['与问题的相关性', summary.relevance],
-    ['局限', summary.limitations?.join('；')],
-  ].filter(([, value]) => Boolean(value));
-  if (!sections.length) return null;
-  return <dl className="summary-facts">{sections.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
 }
