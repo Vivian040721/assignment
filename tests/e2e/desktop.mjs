@@ -1,6 +1,7 @@
 /** Actual Electron/preload/Python/MCP fixture integration. Never uses live keys. */
 import { _electron as electron, expect } from '@playwright/test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile, stat, utimes } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,14 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const packaged = process.argv[2];
 const dev = !packaged && process.env.PAPER_AGENT_E2E_DEV === '1';
+// Offline/restricted networks cannot reach the GitHub Electron release CDN, so
+// prefer the binary already installed by the pinned `electron` devDependency.
+function localElectronExecutable() {
+  if (process.env.PAPER_AGENT_ELECTRON_EXE) return process.env.PAPER_AGENT_ELECTRON_EXE;
+  const candidate = path.join(root, 'node_modules', 'electron', 'dist',
+    process.platform === 'win32' ? 'electron.exe' : 'electron');
+  return existsSync(candidate) ? candidate : undefined;
+}
 const devServer = dev ? await (await import('vite')).createServer({
   configFile: path.join(root, 'frontend/vite.config.ts'), root: path.join(root, 'frontend'),
   server: { host: '127.0.0.1', port: 5173, strictPort: true },
@@ -23,7 +32,7 @@ const env = { ...process.env, PAPER_AGENT_DESKTOP_DATA_DIR: profile,
 delete env.ELECTRON_RUN_AS_NODE;
 const app = await electron.launch({
   ...(packaged ? { executablePath: path.resolve(packaged), args: [`--user-data-dir=${path.join(output, 'chromium')}`] }
-    : { args: ['.', `--user-data-dir=${path.join(output, 'chromium')}`] }),
+    : { args: ['.', `--user-data-dir=${path.join(output, 'chromium')}`], executablePath: localElectronExecutable() }),
   cwd: root, env, timeout: 90_000, chromiumSandbox: true,
 });
 const report = { fixture: true, live_api_calls: 0, packaged: Boolean(packaged), checks: [] };
@@ -242,6 +251,11 @@ try {
   assert.ok(artifact);
   const text = await page.evaluate(({ j, a }) => window.paperAgent.readArtifact(j, a), { j: job.job_id, a: artifact.artifact_id });
   assert.ok(text.text.length > 20);
+  // v0.2.2 second iteration: the comparison section must stay readable Markdown
+  // in the stored artifact instead of leaking raw JSON records.
+  assert.match(text.text, /## 论文比较/);
+  assert.match(text.text, /### 比较 1：\[demo:001\]/);
+  assert.ok(!text.text.includes('"paper_ids"'), 'report comparison must not leak raw JSON');
   await app.evaluate(({ dialog }, exportPath) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath: exportPath });
   }, path.join(output, 'exported-report.md'));
@@ -254,6 +268,31 @@ try {
   });
   assert.equal(blocked, true);
   report.checks.push('paper-detail-report-artifact-export-copy-url-validation');
+
+  // Report state, summary scope and citation must stay distinguishable on the
+  // desktop surface: the fixture report is partial (one demo summary) yet
+  // passes validation, so state, status and validity chips must differ.
+  const reportChips = await page.locator('.report-status-row .status-chip').allTextContents();
+  assert.ok(reportChips.includes('部分结果报告'), `unexpected report state chips: ${reportChips.join(' | ')}`);
+  assert.ok(reportChips.includes('报告有效'), `missing validity chip: ${reportChips.join(' | ')}`);
+  assert.ok(reportChips.includes('演示完成'), `missing demo status chip: ${reportChips.join(' | ')}`);
+  const scopeChips = await page.locator('.report-coverage span').allTextContents();
+  assert.ok(scopeChips.some(chip => chip.includes('演示样例')), `unexpected scope chips: ${scopeChips.join(' | ')}`);
+  const renderedReport = await page.locator('.report-markdown').innerText();
+  assert.match(renderedReport, /论文比较/);
+  assert.match(renderedReport, /比较 1/);
+  assert.ok(renderedReport.includes('synthetic fixtures only'));
+  assert.ok(!renderedReport.includes('"paper_ids"'), 'rendered comparison must not leak raw JSON');
+  assert.equal(finished.result?.metrics?.report_valid, true);
+  await page.getByRole('tab', { name: /^论文。/ }).click();
+  const finalRows = page.locator('.paper-section[aria-labelledby="effective-papers-title"] .paper-row');
+  await expect(finalRows).toHaveCount(1);
+  assert.equal(await page.locator('.paper-section[aria-labelledby="effective-papers-title"] .paper-rank').innerText(), '1');
+  const paperTags = await page.locator('.paper-section[aria-labelledby="effective-papers-title"] .paper-tags').first().innerText();
+  assert.ok(paperTags.includes('演示样例'), `summary scope tag missing: ${paperTags}`);
+  assert.ok(paperTags.includes('全文完整'), `fulltext tag missing: ${paperTags}`);
+  assert.ok(paperTags.includes('报告已引用'), `report citation tag missing: ${paperTags}`);
+  report.checks.push('report-validity-scope-readable-comparison-stable-numbering');
   const benchmarkPath = path.join(output, 'fixture-benchmark.json');
   await writeFile(benchmarkPath, JSON.stringify({
     metadata: { synthetic: true, data_mode: 'demo', repeats_per_mode: 1, input_sha256: 'fixture' },
