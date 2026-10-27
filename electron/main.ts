@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installWindowShortcuts } from './shortcuts';
 import type {
   ArtifactText,
   BenchmarkFile,
@@ -570,47 +571,6 @@ function registerIpc(): void {
   });
 }
 
-function installWindowShortcuts(contents: Electron.WebContents): void {
-  // The native menu is intentionally absent. Preserve the editing and
-  // development shortcuts users expect from a desktop text workspace.
-  contents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown') return;
-    const key = input.key.toLowerCase();
-    const command = input.control || input.meta;
-    if (command && !input.alt) {
-      const actions: Record<string, () => void> = {
-        a: () => contents.selectAll(),
-        c: () => contents.copy(),
-        v: () => contents.paste(),
-        x: () => contents.cut(),
-        z: () => input.shift ? contents.redo() : contents.undo(),
-        y: () => contents.redo(),
-      };
-      const action = actions[key];
-      if (action) {
-        event.preventDefault();
-        action();
-        return;
-      }
-    }
-    if (input.meta && key === 'q') {
-      event.preventDefault();
-      app.quit();
-      return;
-    }
-    if (!app.isPackaged) {
-      if (key === 'f5' || (command && key === 'r')) {
-        event.preventDefault();
-        if (input.shift) contents.reloadIgnoringCache();
-        else contents.reload();
-      } else if (key === 'f12' || (command && input.shift && key === 'i')) {
-        event.preventDefault();
-        contents.toggleDevTools();
-      }
-    }
-  });
-}
-
 async function createMainWindow(): Promise<void> {
   if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); return; }
   const rendererUrl = rendererDevUrl();
@@ -634,7 +594,7 @@ async function createMainWindow(): Promise<void> {
     },
   });
   const contents = mainWindow.webContents;
-  installWindowShortcuts(contents);
+  installWindowShortcuts(contents, { packaged: app.isPackaged, quit: () => app.quit() });
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
   contents.on('will-navigate', (event) => event.preventDefault());
   contents.on('will-redirect', (event) => event.preventDefault());

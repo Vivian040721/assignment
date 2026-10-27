@@ -292,6 +292,9 @@ try {
   assert.ok(paperTags.includes('演示样例'), `summary scope tag missing: ${paperTags}`);
   assert.ok(paperTags.includes('全文完整'), `fulltext tag missing: ${paperTags}`);
   assert.ok(paperTags.includes('报告已引用'), `report citation tag missing: ${paperTags}`);
+  // Restore the report tab so this block leaves the dock as it found it.
+  await page.getByRole('tab', { name: /^研究报告。/ }).click();
+  await expect(page.locator('.report-view')).toBeVisible();
   report.checks.push('report-validity-scope-readable-comparison-stable-numbering');
   const benchmarkPath = path.join(output, 'fixture-benchmark.json');
   await writeFile(benchmarkPath, JSON.stringify({
