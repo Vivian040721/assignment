@@ -91,3 +91,58 @@ test('SSE parser handles chunk boundaries, comments, and multi-line data', () =>
     event: 'update', data: '{"seq":1,\n"kind":"status"}',
   }]);
 });
+
+test('job payloads enforce identifier, array and size bounds', () => {
+  const base = { job_id: 'job_1', session_id: 'sess_1', idea: 'idea', status: 'running',
+    result: null, events: [], artifacts: [], created_at: '2026-10-27', updated_at: '2026-10-27' };
+  assert.equal(validators.validateJob(base).job_id, 'job_1');
+  assert.throws(() => validators.validateJob({ ...base, job_id: 'job 1' }));
+  assert.throws(() => validators.validateJob({ ...base, idea: 'x'.repeat(10001) }));
+  assert.throws(() => validators.validateJob({ ...base, events: new Array(100001).fill({ seq: 1 }) }));
+  assert.throws(() => validators.validateJob({
+    ...base, artifacts: [{ artifact_id: 'bad id', name: 'a.md', kind: 'markdown' }],
+  }));
+  assert.throws(() => validators.validateJob({
+    ...base, artifacts: [{ artifact_id: 'a_1', name: 'x'.repeat(501), kind: 'markdown' }],
+  }));
+});
+
+test('artifact text and location validators bound content and require absolute paths', () => {
+  assert.equal(validators.validateArtifactText({ text: 'x', name: 'a.md', kind: 'markdown', truncated: false }).text, 'x');
+  assert.throws(() => validators.validateArtifactText({ text: 'x', name: 'a.md', kind: 'markdown', truncated: 'no' }));
+  assert.throws(() => validators.validateArtifactText({ text: 'x'.repeat(2 * 1024 * 1024 + 1), name: 'a.md', kind: 'markdown', truncated: false }));
+  const location = { path: 'C:\\data\\a.md', name: 'a.md', kind: 'markdown' };
+  assert.equal(validators.validateArtifactLocation(location).path, location.path);
+  assert.throws(() => validators.validateArtifactLocation({ ...location, path: 'data/a.md' }));
+  assert.throws(() => validators.validateArtifactLocation({ ...location, path: 'x'.repeat(4097) }));
+});
+
+test('public config and service info reject missing or mistyped fields', () => {
+  const config = { provider: 'deepseek', base_url: 'https://api.deepseek.com', model: 'deepseek-flash',
+    api_key_configured: false, openalex_api_key_configured: false, thinking_enabled: false,
+    http_proxy: '', default_top_k: 5, default_execution_mode: 'concurrent', concurrency: 4,
+    llm_timeout: 60, http_timeout: 30 };
+  assert.equal(validators.validatePublicConfig(config).default_top_k, 5);
+  const { default_top_k: _ignored, ...missingTopK } = config;
+  assert.throws(() => validators.validatePublicConfig(missingTopK));
+  assert.throws(() => validators.validatePublicConfig({ ...config, default_execution_mode: 'turbo' }));
+  const info = { version: '0.2.2', api_version: 3, pid: 12, active_jobs: 0,
+    data_root: 'C:\\data', config_path: 'C:\\data\\config.json' };
+  assert.equal(validators.validateServiceInfo(info).version, '0.2.2');
+  assert.throws(() => validators.validateServiceInfo({ ...info, pid: 0 }));
+  assert.throws(() => validators.validateServiceInfo({ ...info, active_jobs: -1 }));
+  assert.throws(() => validators.validateServiceInfo({ ...info, data_root: 42 }));
+});
+
+test('conversation messages stay bounded through the IPC boundary', () => {
+  const conversation = { conversation_id: 'c_1', title: 't', updated_at: '2026-10-27', status: 'completed',
+    messages: [{ id: 'm_1', role: 'user', content: 'hi', kind: 'chat' }], result: null };
+  assert.equal(validators.validateConversation(conversation).messages.length, 1);
+  assert.throws(() => validators.validateConversation({ ...conversation, messages: 'none' }));
+  assert.throws(() => validators.validateConversation({
+    ...conversation, messages: [{ ...conversation.messages[0], content: 'x'.repeat(2_000_001) }],
+  }));
+  assert.throws(() => validators.validateConversation({
+    ...conversation, messages: [{ ...conversation.messages[0], job_id: 'bad id' }],
+  }));
+});
