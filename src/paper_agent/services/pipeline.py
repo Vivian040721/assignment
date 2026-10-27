@@ -23,7 +23,14 @@ from paper_agent.llm_client import ChatClient
 from paper_agent.models import ErrorInfo, Paper, PaperSummary, PipelineResult, StageTiming
 from paper_agent.services.downloader import download_pdf
 from paper_agent.services.pdf_converter import convert_pdf
-from paper_agent.services.retrieval import merge_dedupe_rank, plan_queries
+from paper_agent.services.retrieval import (
+    build_bounded_candidate_pool,
+    match_explicit_targets,
+    merge_dedupe_rank,
+    normalize_explicit_targets,
+    plan_queries,
+    target_in_text,
+)
 from paper_agent.services.semantic_reranker import semantic_rerank
 from paper_agent.sources.arxiv_source import search_arxiv
 from paper_agent.sources.openalex_source import search_openalex
@@ -155,7 +162,9 @@ class ResearchPipeline:
         run.metrics = {"completed_stages": [], "source_success": {}, "source_requests": {},
                        "http_requests": {"source_search": 0, "download": 0, "total": 0},
                        "cache_hits": {"download": 0, "conversion": 0}, "llm_usage": {},
-                       "replacements": [], "analysis_paper_ids": [], "attempted_paper_ids": [],
+                       "replacements": [], "replacement_attempts": [],
+                       "analysis_paper_ids": [], "attempted_paper_ids": [],
+                       "target_coverage": {}, "candidate_pool": {},
                        "frozen_input": False, "injected_selection": self._injected_selection,
                        "model_provenance": ("synthetic_fixture" if self.settings.mode == "demo" else
                                             "injected" if self._injected_llm else "configured_chat_client"),
@@ -183,6 +192,94 @@ class ResearchPipeline:
         if stage not in run.metrics.get("completed_stages", []):
             raise ValueError(f"必须先完成 {stage} 阶段，才能调用这个工具")
 
+    def _refresh_target_coverage(self, run: PipelineResult, stage: str) -> None:
+        """Record actual target traceability at each real pipeline stage."""
+        coverage = run.metrics.get("target_coverage")
+        if not isinstance(coverage, dict) or not coverage.get("targets"):
+            return
+        papers = {paper.paper_id: paper for paper in run.papers}
+        selected_ids = [paper.paper_id for paper in run.selected_papers]
+        selected_set = set(selected_ids)
+        analysis_ids = [
+            value for value in run.metrics.get("analysis_paper_ids", []) if isinstance(value, str)
+        ]
+        analysis_set = set(analysis_ids)
+        summaries = {summary.paper_id: summary for summary in run.summaries}
+        report_ids = (
+            [reference.paper_id for reference in run.report.references]
+            if run.report is not None else []
+        )
+        report_set = set(report_ids)
+        for item in coverage["targets"]:
+            direct = [
+                paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                if isinstance(paper_id, str)
+            ]
+            complete, partial, summarized = [], [], []
+            fulltext_summaries, partial_summaries = [], []
+            for paper_id in direct:
+                paper = papers.get(paper_id)
+                if paper is not None and paper_id in analysis_set:
+                    if self._complete(paper):
+                        complete.append(paper_id)
+                    elif self._readable(paper):
+                        partial.append(paper_id)
+                summary = summaries.get(paper_id)
+                if summary is not None:
+                    summarized.append(paper_id)
+                    if summary.summary_scope == "fulltext" and not summary.errors:
+                        fulltext_summaries.append(paper_id)
+                    else:
+                        partial_summaries.append(paper_id)
+            item.update(
+                selected_paper_ids=[paper_id for paper_id in direct if paper_id in selected_set],
+                analysis_paper_ids=[paper_id for paper_id in direct if paper_id in analysis_set],
+                complete_fulltext_paper_ids=complete,
+                partial_fulltext_paper_ids=partial,
+                summarized_paper_ids=summarized,
+                fulltext_summary_paper_ids=fulltext_summaries,
+                partial_summary_paper_ids=partial_summaries,
+                report_paper_ids=[paper_id for paper_id in direct if paper_id in report_set],
+            )
+        coverage.update(
+            selected_paper_ids=selected_ids,
+            analysis_paper_ids=analysis_ids,
+            report_reference_ids=report_ids,
+            stage=stage,
+        )
+        if run.metrics.get("report_valid") is not None:
+            coverage["report_valid"] = bool(run.metrics["report_valid"])
+
+    @staticmethod
+    def _replacement_order(
+        remaining: list[Paper], coverage: dict[str, Any], complete_ids: set[str],
+        full_order: dict[str, int],
+    ) -> list[Paper]:
+        """Order bounded replacement attempts without changing the full pool."""
+        direct_all: set[str] = set()
+        uncovered_direct: set[str] = set()
+        for item in coverage.get("targets", []) if isinstance(coverage, dict) else []:
+            direct = {
+                paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                if isinstance(paper_id, str)
+            }
+            direct_all |= direct
+            if not (direct & complete_ids):
+                uncovered_direct |= direct
+
+        def key(paper: Paper) -> tuple[int, int]:
+            if paper.paper_id in uncovered_direct:
+                bucket = 0
+            elif paper.paper_id in direct_all:
+                bucket = 1
+            elif paper.pdf_url or paper.pdf_urls:
+                bucket = 2
+            else:
+                bucket = 3
+            return bucket, full_order.get(paper.paper_id, len(full_order))
+
+        return sorted(remaining, key=key)
+
     async def _map(self, function: Callable, values: list[Any]):
         if self.settings.processing == "serial":
             return [await function(value) for value in values]
@@ -206,15 +303,56 @@ class ResearchPipeline:
             else:
                 plan = await self.query_planner(run.idea, settings=self.settings,
                                                 llm=self._model() if self.settings.mode == "demo" or self.llm is not None or self.settings.llm_model else None)
-            run.queries = list(plan.get("queries", []))
+            if not isinstance(plan, dict):
+                raise ValueError("查询规划返回了无效结构")
+            plan = dict(plan)
+            raw_queries = plan.get("queries", [])
+            queries = [
+                " ".join(value.split()) for value in raw_queries
+                if isinstance(value, str) and value.strip()
+            ] if isinstance(raw_queries, list) else []
+            plan["warnings"] = [
+                warning for warning in plan.get("warnings", []) if isinstance(warning, str)
+            ] if isinstance(plan.get("warnings"), list) else []
+            if len(queries) > 3:
+                queries = queries[:3]
+                plan["warnings"].append("规划器返回超过三条检索词，已按来源请求规模保留前三条。")
+            existing_target_audit = plan.get("target_audit")
+            targets, target_audit = normalize_explicit_targets(run.idea, plan.get("explicit_targets", []))
+            if isinstance(existing_target_audit, dict) and isinstance(existing_target_audit.get("rejected"), list):
+                # Preserve planner rejections while re-validating accepted names.
+                target_audit["rejected"] = [
+                    *existing_target_audit["rejected"], *target_audit["rejected"]
+                ]
+            target_queries: dict[str, str] = {}
+            for target in targets:
+                query = next((value for value in queries if target_in_text(target, value)), None)
+                if query:
+                    target_queries[target] = query
+            covered_targets = list(target_queries)
+            uncovered_targets = [target for target in targets if target not in target_queries]
+            if uncovered_targets:
+                plan["warnings"].append(
+                    f"有 {len(uncovered_targets)} 个点名目标没有实际执行的定向查询；目标记录保留，检索覆盖不足。"
+                )
+            plan.update(
+                queries=queries, explicit_targets=targets, target_queries=target_queries,
+                query_covered_targets=covered_targets,
+                query_uncovered_targets=uncovered_targets, target_audit=target_audit,
+            )
+            run.queries = queries
             run.metrics["query_plan"] = plan
             run.metrics["query_degraded"] = bool(plan.get("errors") or plan.get("mode") == "english_fallback")
-            _add_errors(run, [ErrorInfo.model_validate(error) for error in plan.get("errors", [])])
+            _add_errors(run, [
+                ErrorInfo.model_validate(error) for error in plan.get("errors", [])
+                if isinstance(error, dict)
+            ])
             if not run.queries:
                 run.errors.append(ErrorInfo(code="translation_required", message="请提供英文检索词，或配置翻译模型。", stage="search"))
                 run.status = "failed"
                 return self._finish(run, "search", start, before)
             ranking_query = str(plan.get("ranking_query") or run.queries[0])
+            plan["ranking_query"] = ranking_query
             run.query = run.queries[0]
         except Exception as exc:
             run.errors.append(_failure(exc, "search"))
@@ -280,13 +418,50 @@ class ResearchPipeline:
                 "candidate_count": len(ranked), "encoded_count": 0, "cache_hits": 0,
                 "duration_seconds": 0.0,
             }
-        ranking_audit["candidate_count_before_truncation"] = len(ranked)
-        if self.settings.merged_candidate_limit:
-            ranked = ranked[:max(self.settings.merged_candidate_limit, k)]
-        ranking_audit["candidate_count_after_truncation"] = len(ranked)
+        # The complete ordered pool stays on the run for bounded replacements.
+        # Only a separate copy is bounded for the Selector request.
+        full_ranked = ranked
+        targets = plan.get("explicit_targets", [])
+        coverage = match_explicit_targets(targets, full_ranked) if targets else {}
+        if coverage:
+            query_map = plan.get("target_queries", {})
+            for item in coverage.get("targets", []):
+                item["query"] = query_map.get(item["target"])
+                item["query_covered"] = bool(item.get("query"))
+            coverage["query_covered_targets"] = list(plan.get("query_covered_targets", []))
+            coverage["query_uncovered_targets"] = list(plan.get("query_uncovered_targets", []))
+            for paper in full_ranked:
+                matches = coverage.get("paper_matches", {}).get(paper.paper_id, {})
+                direct = list(matches.get("direct_targets", []))
+                abstract = list(matches.get("abstract_targets", []))
+                if direct or abstract:
+                    paper.metadata["target_matches"] = {
+                        "direct_title": direct, "abstract_only": abstract,
+                    }
+        selector_pool, pool_audit = build_bounded_candidate_pool(
+            full_ranked, k=run.top_k, merged_limit=self.settings.merged_candidate_limit,
+            candidate_limit=self.settings.candidate_limit, coverage=coverage,
+        )
+        selector_ids = {paper.paper_id for paper in selector_pool}
+        for item in coverage.get("targets", []):
+            item["selector_pool_direct_paper_ids"] = [
+                paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                if paper_id in selector_ids
+            ]
+        coverage["selector_pool_ids"] = [paper.paper_id for paper in selector_pool]
+        ranking_audit["candidate_count_before_truncation"] = len(full_ranked)
+        ranking_audit["candidate_count_after_truncation"] = pool_audit["merged_candidate_count"]
+        ranking_audit["selector_input_count"] = len(selector_pool)
+        ranking_audit["full_candidate_count"] = len(full_ranked)
         run.metrics["ranking"] = ranking_audit
-        run.papers = ranked
-        run.metrics["downstream_candidate_count"] = len(ranked)
+        run.papers = full_ranked
+        run.metrics.update(
+            candidate_pool=pool_audit, target_coverage=coverage,
+            downstream_candidate_count=len(selector_pool),
+            full_candidate_count=len(full_ranked),
+            merged_candidate_count=pool_audit["merged_candidate_count"],
+        )
+        self._refresh_target_coverage(run, "search")
         count = sum(run.metrics["source_requests"].values())
         run.metrics["http_requests"].update(source_search=count, total=count)
         run.status = "searched" if run.papers else "failed"
@@ -299,15 +474,63 @@ class ResearchPipeline:
             if "selection" in run.metrics["completed_stages"]:
                 return run
             start, before = time.perf_counter(), _usage(self.llm)
+            coverage = run.metrics.get("target_coverage")
+            coverage = coverage if isinstance(coverage, dict) else {}
+            targets = [
+                value for value in coverage.get("explicit_targets", []) if isinstance(value, str)
+            ]
+            by_id = {paper.paper_id: paper for paper in run.papers}
+            required = min(run.top_k, len(run.papers))
+            if self.settings.candidate_limit < required:
+                raise ValueError("候选上限不足以覆盖请求的 Top-k")
+            pool_ids = (run.metrics.get("candidate_pool") or {}).get("selector_pool_ids")
+            selector_pool: list[Paper] = []
+            if isinstance(pool_ids, list):
+                seen_pool: set[str] = set()
+                for paper_id in pool_ids:
+                    if isinstance(paper_id, str) and paper_id in by_id and paper_id not in seen_pool:
+                        seen_pool.add(paper_id)
+                        selector_pool.append(by_id[paper_id])
+            if len(selector_pool) < required:
+                selector_pool, pool_audit = build_bounded_candidate_pool(
+                    run.papers, k=run.top_k, merged_limit=self.settings.merged_candidate_limit,
+                    candidate_limit=self.settings.candidate_limit, coverage=coverage,
+                )
+                run.metrics["candidate_pool"] = pool_audit
+                run.metrics["downstream_candidate_count"] = len(selector_pool)
+            selector_pool = selector_pool[:self.settings.candidate_limit]
+            if len(selector_pool) < required:
+                raise ValueError("Selector 输入池不足以覆盖请求的 Top-k")
             self.store.event(run_id, "selector", event="start", agent="llm_selector",
-                             synthetic=run.mode == "demo", candidate_count=len(run.papers))
+                             synthetic=run.mode == "demo", candidate_count=len(selector_pool),
+                             full_candidate_count=len(run.papers), explicit_targets=targets)
             try:
                 async with self._llm_gate:
-                    run.selected_papers = await self.selector(run.idea, run.papers, run.top_k,
-                                                             settings=self.settings, llm=self._model())
+                    if self._injected_selection:
+                        selected = await self.selector(
+                            run.idea, selector_pool, run.top_k,
+                            settings=self.settings, llm=self._model(),
+                        )
+                    else:
+                        selected = await self.selector(
+                            run.idea, selector_pool, run.top_k,
+                            settings=self.settings, llm=self._model(),
+                            targets=targets, target_matches=coverage,
+                        )
+                run.selected_papers = selected
                 run.metrics["selector_degraded"] = any(p.metadata.get("selection", {}).get("degraded") for p in run.selected_papers)
+                run.metrics["selection"] = {
+                    "selector_input_ids": [paper.paper_id for paper in selector_pool],
+                    "llm_selected_ids": [paper.paper_id for paper in run.selected_papers],
+                    "llm_ranking": [
+                        {"paper_id": paper.paper_id, "rank": paper.rank}
+                        for paper in run.selected_papers
+                    ],
+                    "target_protections": (run.metrics.get("candidate_pool") or {}).get("target_protections", []),
+                }
                 run.status = "selected" if run.selected_papers else "failed"
                 _add_errors(run, [error for p in run.selected_papers for error in p.errors])
+                self._refresh_target_coverage(run, "selection")
             except Exception as exc:
                 run.errors.append(_failure(exc, "selection"))
                 run.status = "failed"
@@ -336,6 +559,9 @@ class ResearchPipeline:
             start, before = time.perf_counter(), _usage(self.llm)
             attempted: dict[str, Paper] = {}
             attempt_order: list[str] = []
+            coverage = run.metrics.get("target_coverage")
+            coverage = coverage if isinstance(coverage, dict) else {}
+            full_order = {paper.paper_id: index for index, paper in enumerate(run.papers)}
 
             async def prepare(paper):
                 result = paper.model_copy(deep=True)
@@ -348,42 +574,123 @@ class ResearchPipeline:
                 except Exception as exc:
                     result.status, result.error = "failed", "全文处理失败"
                     result.errors.append(_failure(exc, "fulltexts", paper.paper_id))
-                attempted[result.paper_id] = result
                 self.store.event(run_id, "fulltext_paper", paper_id=paper.paper_id,
                                  status=result.status, complete=self._complete(result))
                 return result
 
-            attempt_order.extend(p.paper_id for p in run.selected_papers)
-            initial = await self._map(prepare, run.selected_papers)
+            async def prepare_initial(item):
+                index, paper = item
+                result = await prepare(paper)
+                result.metadata["fulltext_provenance"] = {
+                    "role": "original", "attempt_order": index + 1,
+                    "original_paper_id": paper.paper_id,
+                }
+                return result
+
+            initial = await self._map(prepare_initial, list(enumerate(run.selected_papers)))
+            for result in initial:
+                attempted[result.paper_id] = result
+                attempt_order.append(result.paper_id)
             complete = [p for p in initial if self._complete(p)]
-            unavailable = [p for p in initial if not self._complete(p)]
+            complete_ids = {p.paper_id for p in complete}
+            unavailable = [p for p in initial if p.paper_id not in complete_ids]
+            slots = [p.paper_id for p in unavailable]
+            filled_slots: set[str] = set()
             original_ids = {p.paper_id for p in run.selected_papers}
             remaining = [p for p in run.papers if p.paper_id not in original_ids]
-            replacements = []
+            replacements: list[dict[str, str]] = []
+            replacement_attempts: list[dict[str, Any]] = []
             replacement_budget = self.settings.max_fulltext_attempts or len(remaining)
             replacements_attempted = 0
             while len(complete) < run.top_k and remaining and replacements_attempted < replacement_budget:
                 requested = min(run.top_k - len(complete), replacement_budget - replacements_attempted)
-                batch, remaining = remaining[:requested], remaining[requested:]
+                if requested <= 0:
+                    break
+                ordered = self._replacement_order(remaining, coverage, complete_ids, full_order)
+                batch = ordered[:requested]
+                batch_ids = {paper.paper_id for paper in batch}
+                remaining = [paper for paper in remaining if paper.paper_id not in batch_ids]
                 replacements_attempted += len(batch)
-                attempt_order.extend(p.paper_id for p in batch)
                 for paper in await self._map(prepare, batch):
-                    if self._complete(paper):
-                        original = unavailable[len(replacements)].paper_id if len(replacements) < len(unavailable) else None
-                        replacements.append({"original_paper_id": original, "replacement_paper_id": paper.paper_id})
+                    complete_flag = self._complete(paper)
+                    readable = self._readable(paper)
+                    original_id = next(
+                        (slot for slot in slots if slot not in filled_slots), None
+                    )
+                    if complete_flag:
+                        role = "replacement_complete"
+                        if original_id is not None:
+                            filled_slots.add(original_id)
+                            replacements.append({
+                                "original_paper_id": original_id,
+                                "replacement_paper_id": paper.paper_id,
+                            })
                         complete.append(paper)
+                        complete_ids.add(paper.paper_id)
+                    else:
+                        role = "replacement_partial" if readable else "replacement_failed"
+                    paper.metadata["fulltext_provenance"] = {
+                        "role": role, "attempt_order": len(attempt_order) + 1,
+                        "original_paper_id": original_id,
+                    }
+                    attempted[paper.paper_id] = paper
+                    attempt_order.append(paper.paper_id)
+                    failure_codes = [
+                        error.code for error in paper.errors if isinstance(error.code, str)
+                    ]
+                    replacement_attempts.append({
+                        "attempt_order": len(replacement_attempts) + 1,
+                        "replacement_paper_id": paper.paper_id,
+                        "original_paper_id": original_id,
+                        "status": paper.status,
+                        "complete": complete_flag,
+                        "readable": readable,
+                        "failure_code": failure_codes[0] if failure_codes else None,
+                        "failure_codes": failure_codes,
+                        "in_analysis": False,
+                        "summary_scope": None,
+                        "target_direct": any(
+                            paper.paper_id in item.get("direct_title_paper_ids", [])
+                            for item in coverage.get("targets", [])
+                        ),
+                        "open_access_url": bool(paper.pdf_url or paper.pdf_urls),
+                    })
             # Partial text is usable only with an explicit partial summary scope;
             # it does not displace a complete candidate or count as complete.
             partial = [attempted[paper_id] for paper_id in attempt_order
-                       if not self._complete(attempted[paper_id]) and self._readable(attempted[paper_id])]
+                       if paper_id in attempted and not self._complete(attempted[paper_id])
+                       and self._readable(attempted[paper_id])]
             analysis = (complete + partial)[:run.top_k]
+            analysis_ids = {paper.paper_id for paper in analysis}
+            for paper in initial:
+                provenance = paper.metadata.get("fulltext_provenance", {})
+                provenance["in_analysis"] = paper.paper_id in analysis_ids
+                paper.metadata["fulltext_provenance"] = provenance
+            for item in replacement_attempts:
+                item["in_analysis"] = item["replacement_paper_id"] in analysis_ids
+                result = attempted.get(item["replacement_paper_id"])
+                if result is not None:
+                    provenance = result.metadata.get("fulltext_provenance", {})
+                    provenance["in_analysis"] = item["in_analysis"]
+                    result.metadata["fulltext_provenance"] = provenance
             run.papers = [attempted.get(p.paper_id, p) for p in run.papers]
-            run.metrics.update(replacements=replacements, analysis_paper_ids=[p.paper_id for p in analysis],
-                               attempted_paper_ids=attempt_order, fulltext_count=len(complete),
-                               fulltext_attempt_limit_reached=bool(
-                                   self.settings.max_fulltext_attempts and remaining
-                                   and len(complete) < run.top_k),
-                               partial_fulltext_count=sum(not self._complete(p) for p in analysis))
+            run.metrics.update(
+                replacements=replacements, replacement_attempts=replacement_attempts,
+                analysis_paper_ids=[p.paper_id for p in analysis],
+                attempted_paper_ids=attempt_order,
+                attempted_count=len(attempt_order),
+                replacement_attempt_count=len(replacement_attempts),
+                partial_replacement_ids=[
+                    item["replacement_paper_id"] for item in replacement_attempts
+                    if item["in_analysis"] and not item["complete"]
+                ],
+                fulltext_count=len(complete),
+                fulltext_attempt_limit_reached=bool(
+                    self.settings.max_fulltext_attempts and remaining
+                    and len(complete) < run.top_k),
+                replacement_candidates_remaining=[p.paper_id for p in remaining],
+                partial_fulltext_count=sum(not self._complete(p) for p in analysis),
+            )
             for paper in attempted.values():
                 _add_errors(run, paper.errors)
             downloads = sum(int(p.metadata.get("downloads", {}).get("request_count", 0)) for p in attempted.values())
@@ -393,6 +700,7 @@ class ResearchPipeline:
                 "download": sum(bool(p.metadata.get("downloads", {}).get("cache_hit")) for p in attempted.values()),
                 "conversion": sum(bool(p.fulltext_quality.get("cache_hit")) for p in attempted.values()),
             }
+            self._refresh_target_coverage(run, "fulltexts")
             run.status = "fulltexts_ready" if analysis else "failed"
             return self._finish(run, "fulltexts", start, before, successes=len(complete), requests=downloads)
 
@@ -419,7 +727,22 @@ class ResearchPipeline:
                 return value
             run.summaries = await self._map(summarize, run.metrics["analysis_paper_ids"])
             _add_errors(run, [error for summary in run.summaries for error in summary.errors])
-            run.metrics["fulltext_summary_count"] = sum(s.summary_scope == "fulltext" and not s.errors for s in run.summaries)
+            run.metrics["fulltext_summary_count"] = sum(
+                summary.summary_scope == "fulltext"
+                and not summary.errors
+                and bool(summary.overview.strip())
+                and bool(summary.deep_analysis.strip())
+                for summary in run.summaries
+            )
+            summaries_by_id = {summary.paper_id: summary for summary in run.summaries}
+            for item in run.metrics.get("replacement_attempts", []):
+                if not isinstance(item, dict):
+                    continue
+                summary = summaries_by_id.get(item.get("replacement_paper_id"))
+                if summary is not None:
+                    item["summary_scope"] = summary.summary_scope
+                    item["summary_complete"] = summary.summary_scope == "fulltext" and not summary.errors
+            self._refresh_target_coverage(run, "summarize")
             run.status = "summarized" if run.summaries else "failed"
             return self._finish(run, "summarize", start, before,
                                 successes=sum(s.summary_scope != "failed" for s in run.summaries))
@@ -442,11 +765,27 @@ class ResearchPipeline:
                 run.errors.append(_failure(exc, "report"))
             report = run.report
             available = {s.paper_id for s in run.summaries if s.summary_scope != "failed" and s.research_question.strip()}
-            report_valid = bool(report and report.overview.strip() and report.report_path
-                                and Path(report.report_path).is_file() and report.markdown.strip()
-                                and {r.paper_id for r in report.references} == available and available
-                                and not [e for e in report.errors if run.mode != "demo" or e.code != "partial_report"])
+            expected_scope = "demo_fixture" if run.mode == "demo" else "fulltext"
+            summary_inputs_valid = bool(run.summaries) and all(
+                summary.summary_scope == expected_scope
+                and not summary.errors
+                and bool(summary.overview.strip())
+                and bool(summary.deep_analysis.strip())
+                for summary in run.summaries
+            )
+            run.metrics["report_summary_inputs_valid"] = summary_inputs_valid
+            report_valid = bool(
+                report and report.overview.strip() and report.report_path
+                and Path(report.report_path).is_file() and report.markdown.strip()
+                and {r.paper_id for r in report.references} == available and available
+                and summary_inputs_valid
+                and not [e for e in report.errors if run.mode != "demo" or e.code != "partial_report"]
+            )
             run.metrics["report_valid"] = report_valid
+            run.metrics["report_reference_ids"] = (
+                [reference.paper_id for reference in report.references] if report else []
+            )
+            self._refresh_target_coverage(run, "report")
             complete = (report_valid and run.metrics.get("fulltext_count", 0) >= run.top_k
                         and len(run.selected_papers) == run.top_k
                         and not run.metrics.get("selector_degraded")

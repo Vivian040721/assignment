@@ -1,5 +1,5 @@
-import { AlertTriangle, GitMerge, Info } from 'lucide-react';
-import type { Paper, PipelineResult, Summary } from '../../../types/contracts';
+import { AlertTriangle, Crosshair, GitMerge, Info } from 'lucide-react';
+import type { Paper, PipelineResult, Summary, TargetCoverageEntry } from '../../../types/contracts';
 import { errorHint, errorLabel, rankingFallbackLabel } from '../../../utils/labels';
 import {
   isTerminalResult,
@@ -10,6 +10,7 @@ import {
   rankingModeLabel,
   scoreDescription,
   shortModelName,
+  targetCoverageForResult,
 } from '../../../utils/papers';
 
 export function RankingSummary({ result }: { result: PipelineResult }) {
@@ -31,6 +32,113 @@ export function RankingSummary({ result }: { result: PipelineResult }) {
     </div>
     {semantic && <p className="ranking-note"><Info size={12}/>关键词名次与 Sentence-BERT 语义名次按 0.5/(60+rank) 融合；RRF 分数不是概率。展开论文可查看各自名次。</p>}
   </section>;
+}
+
+export function TargetCoverageSummary({ result, compact = false }: { result: PipelineResult; compact?: boolean }) {
+  const coverage = targetCoverageForResult(result);
+  if (!coverage?.targets?.length) return null;
+  const metricValid = result.metrics?.report_valid;
+  const reportValid = coverage.report_valid ?? (typeof metricValid === 'boolean' ? metricValid : undefined);
+  const terminal = isTerminalResult(result);
+  return <section className={`target-coverage ${compact ? 'is-compact' : ''}`} aria-label="点名目标覆盖">
+    <div className="target-coverage-head">
+      <span className="target-coverage-icon"><Crosshair size={14}/></span>
+      <div><span className="eyebrow">点名目标</span><strong>真实检索与后续覆盖</strong></div>
+      {typeof reportValid === 'boolean' && <span className={`status-chip status-${reportValid ? 'completed' : 'partial'}`}>{reportValid ? '报告有效' : '报告未通过校验'}</span>}
+    </div>
+    <p className="target-coverage-note">标题匹配只是词面线索，不代表已验证原始论文身份；是否选入、是否构成有效分析仍由真实检索、模型判断与后续结果决定。</p>
+    <ul className="target-coverage-list">
+      {coverage.targets.map((item, index) => <TargetCoverageRow
+        key={`${item.target}:${index}`}
+        item={item}
+        reportValid={reportValid}
+        terminal={terminal}
+        stage={coverage.stage}
+      />)}
+    </ul>
+  </section>;
+}
+
+function TargetCoverageRow({ item, reportValid, terminal, stage }: {
+  item: TargetCoverageEntry; reportValid?: boolean; terminal: boolean; stage?: string;
+}) {
+  const direct = item.direct_title_paper_ids ?? [];
+  const abstract = item.abstract_mention_paper_ids ?? [];
+  const pool = item.selector_pool_direct_paper_ids ?? [];
+  const analysis = item.analysis_paper_ids ?? [];
+  const complete = item.complete_fulltext_paper_ids ?? [];
+  const partial = item.partial_fulltext_paper_ids ?? [];
+  const summarized = item.summarized_paper_ids ?? [];
+  const fulltextSummary = item.fulltext_summary_paper_ids ?? [];
+  const partialSummary = item.partial_summary_paper_ids ?? [];
+  const report = item.report_paper_ids ?? [];
+  const stageReached = (...values: string[]) => Boolean(stage && values.includes(stage));
+  const selectionPending = !terminal && !stageReached('selection', 'fulltexts', 'summarize', 'report');
+  const analysisPending = !terminal && !stageReached('fulltexts', 'summarize', 'report');
+  const summaryPending = !terminal && !stageReached('summarize', 'report');
+  const reportPending = !terminal && !stageReached('report');
+  const retrieval = direct.length
+    ? { label: `标题词面匹配 ${direct.length}`, tone: 'is-good', title: direct.join(', ') }
+    : abstract.length
+      ? { label: `仅摘要提及 ${abstract.length}`, tone: 'is-warn', title: abstract.join(', ') }
+      : { label: '未检索到', tone: 'is-warn', title: '' };
+  const selectorChip = selectionPending
+    ? { label: '等待筛选', tone: '', title: '' }
+    : !direct.length
+      ? { label: '无直接候选', tone: '', title: '' }
+      : pool.length
+        ? { label: `进入 Selector 池 ${pool.length}`, tone: 'is-good', title: pool.join(', ') }
+        : { label: '直接匹配未进入 Selector 池', tone: 'is-warn', title: direct.join(', ') };
+  const analysisChip = analysisPending
+    ? { label: '等待全文/分析', tone: '', title: '' }
+    : analysis.length
+      ? { label: `最终分析 ${analysis.length}`, tone: 'is-good', title: analysis.join(', ') }
+      : { label: terminal ? '未进入最终分析' : '暂无最终分析', tone: 'is-warn', title: direct.join(', ') };
+  const fulltextChip = analysisPending
+    ? { label: '等待全文处理', tone: '', title: '' }
+    : !analysis.length
+      ? { label: '未进入全文分析', tone: '', title: '' }
+      : complete.length
+        ? { label: `全文完整 ${complete.length}`, tone: 'is-good', title: complete.join(', ') }
+        : partial.length
+          ? { label: `部分全文 ${partial.length}`, tone: 'is-warn', title: partial.join(', ') }
+          : { label: terminal ? '无可读全文' : '全文处理中', tone: terminal ? 'is-warn' : '', title: '' };
+  const summaryChip = summaryPending
+    ? { label: '等待总结', tone: '', title: '' }
+    : !analysis.length
+      ? { label: '未进入总结', tone: '', title: '' }
+      : fulltextSummary.length
+        ? { label: `总结完整 ${fulltextSummary.length}`, tone: 'is-good', title: fulltextSummary.join(', ') }
+        : summarized.length
+          ? { label: `部分总结 ${summarized.length}`, tone: 'is-warn', title: summarized.join(', ') }
+          : { label: terminal ? '总结未完成' : '总结生成中', tone: terminal ? 'is-warn' : '', title: '' };
+  const reportChip = reportPending
+    ? { label: '等待报告', tone: '', title: '' }
+    : report.length
+      ? {
+        label: reportValid === false ? `报告引用 ${report.length}（报告未通过校验）` : `报告引用 ${report.length}`,
+        tone: reportValid === false ? 'is-warn' : 'is-good',
+        title: report.join(', '),
+      }
+      : { label: terminal ? '未纳入报告' : '报告处理中', tone: terminal ? 'is-warn' : '', title: '' };
+  const chips = [
+    { label: retrieval.label, tone: retrieval.tone, title: retrieval.title },
+    {
+      label: item.query_covered && item.query ? `定向查询：${item.query}` : '无定向查询',
+      tone: item.query_covered ? '' : 'is-warn', title: item.query ?? '',
+    },
+    selectorChip,
+    analysisChip,
+    fulltextChip,
+    { ...summaryChip, title: [...fulltextSummary, ...partialSummary].join(', ') || summaryChip.title },
+    reportChip,
+  ];
+  return <li className="target-coverage-row">
+    <div className="target-coverage-name"><strong>{item.target}</strong></div>
+    <div className="target-coverage-chips">
+      {chips.map((chip, index) => <span key={`${chip.label}:${index}`} className={`target-chip ${chip.tone}`} title={chip.title || undefined}>{chip.label}</span>)}
+    </div>
+  </li>;
 }
 
 export function PartialResultSummary({ result, compact = false }: { result: PipelineResult; compact?: boolean }) {

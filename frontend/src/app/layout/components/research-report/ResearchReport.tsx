@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, BookOpen, Copy, Download, FileText, FolderOpen } from 'lucide-react';
 import type { Artifact, ContractError, PipelineResult } from '../../../types/contracts';
 import { desktopApi } from '../../../services/desktopApi';
 import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStore';
 import { statusLabel } from '../../../utils/status';
 import { errorHint, errorLabel, summaryScopeLabel } from '../../../utils/labels';
+import { readableReportMarkdown } from '../../../utils/reportMarkdown';
 import { MarkdownContent } from '../common/MarkdownContent';
+import { TargetCoverageSummary } from '../common/ResultInsights';
 
 export function ResearchReport() {
   const { activeJob, resultJob, conversation } = useWorkspaceState();
@@ -20,6 +22,10 @@ export function ResearchReport() {
   const [error, setError] = useState<string | null>(null);
   const [exportedPath, setExportedPath] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const displayMarkdown = useMemo(
+    () => readableReportMarkdown(markdown, report?.comparison),
+    [markdown, report?.comparison],
+  );
 
   useEffect(() => {
     let current = true;
@@ -49,9 +55,9 @@ export function ResearchReport() {
   }, [job?.job_id, report?.markdown, reportArtifact?.artifact_id]);
 
   const copyReport = async () => {
-    if (!markdown) return;
+    if (!displayMarkdown) return;
     try {
-      await desktopApi().copyText(markdown);
+      await desktopApi().copyText(displayMarkdown);
       workspaceStore.setNotice('研究报告已复制。');
     } catch (reason) {
       workspaceStore.setError(reason instanceof Error ? reason.message : String(reason));
@@ -92,7 +98,8 @@ export function ResearchReport() {
 
   const reportErrors = collectReportErrors(result, report);
   const state = reportState(result, report, reportErrors);
-  const headings = markdownHeadings(markdown);
+  const validity = reportValidity(result);
+  const headings = markdownHeadings(displayMarkdown);
   const references = report?.references ?? [];
   const reportLimitations = (report?.limitations ?? []).filter(item =>
     !item.startsWith('部分报告：') && !item.startsWith('报告提示使用了') &&
@@ -103,16 +110,17 @@ export function ResearchReport() {
   }
   return <article className="report-view">
     <header className="report-header"><div><span className="eyebrow">研究产物</span><h2>{state.title}</h2><p>{job?.idea ?? conversation?.title ?? '当前会话'}</p></div><span className="report-file-mark"><FileText size={17}/></span></header>
-    <div className="report-status-row"><span className={`status-chip status-${state.tone}`}>{state.label}</span>{result && <span className={`status-chip status-${result.status}`}>{statusLabel(result.status)}</span>}{references.length > 0 && <span className="report-meta">引用 {references.length} 篇</span>}</div>
+    <div className="report-status-row"><span className={`status-chip status-${state.tone}`}>{state.label}</span>{result && <span className={`status-chip status-${result.status}`}>{statusLabel(result.status)}</span>}{validity && <span className={`status-chip status-${validity.tone}`}>{validity.label}</span>}{references.length > 0 && <span className="report-meta">引用 {references.length} 篇</span>}</div>
     <p className={`report-state-note ${state.tone === 'failed' ? 'is-error' : ''}`}>{state.note}</p>
     {scopeCounts.size > 0 && <div className="report-coverage">
       {[...scopeCounts.entries()].map(([scope, count]) => <span key={scope}>{summaryScopeLabel(scope)} <strong>{count}</strong></span>)}
     </div>}
+    {result && <TargetCoverageSummary result={result} compact/>}
     <div className="report-actions">
-      <button className="subtle-button" type="button" disabled={!markdown} onClick={() => void copyReport()}><Copy size={14}/>复制</button>
+      <button className="subtle-button" type="button" disabled={!displayMarkdown} onClick={() => void copyReport()}><Copy size={14}/>复制</button>
       {reportArtifact && <button className="subtle-button" type="button" onClick={() => void exportReport()}><Download size={14}/>导出</button>}
       {reportArtifact && <button className="subtle-button" type="button" onClick={() => void openReport()}><FolderOpen size={14}/>打开文件</button>}
-      {markdown.length > 6000 && <button className="subtle-button" type="button" onClick={scrollToTop}><ArrowUp size={14}/>回到顶部</button>}
+      {displayMarkdown.length > 6000 && <button className="subtle-button" type="button" onClick={scrollToTop}><ArrowUp size={14}/>回到顶部</button>}
       {reportArtifact && <span className="file-name">{reportArtifact.name}</span>}
     </div>
     {exportedPath && <p className="file-confirmation">已导出：{exportedPath}</p>}
@@ -130,7 +138,7 @@ export function ResearchReport() {
       </li>)}</ul>
     </details>}
     {loading ? <div className="reader-loading" aria-live="polite"><span className="skeleton-line wide"/><span className="skeleton-line"/><span className="skeleton-line medium"/></div>
-      : markdown ? <div ref={contentRef} className="report-markdown"><MarkdownContent text={markdown}/></div>
+      : displayMarkdown ? <div ref={contentRef} className="report-markdown"><MarkdownContent text={displayMarkdown}/></div>
         : report?.overview ? <div className="report-preview"><h3>报告概述</h3><p>{report.overview}</p>{reportLimitations.length ? <ul>{reportLimitations.map(limitation => <li key={limitation}>{limitation}</li>)}</ul> : null}</div>
           : <div className="panel-empty compact-empty"><span><BookOpen size={19}/></span><strong>报告正文未随结果返回</strong><p>请检查活动记录中的报告生成状态和服务端错误。</p></div>}
     {truncated && <div className="inline-warning" role="status">报告超过 2 MiB，当前仅显示服务端返回的截断内容。</div>}
@@ -149,6 +157,14 @@ function collectReportErrors(result: PipelineResult | null, report: PipelineResu
     output.push(item);
   }
   return output;
+}
+
+function reportValidity(result: PipelineResult | null): { label: string; tone: string } | null {
+  const value = result?.metrics?.report_valid;
+  if (typeof value !== 'boolean') return null;
+  return value
+    ? { label: '报告有效', tone: 'completed' }
+    : { label: '报告未通过校验', tone: 'failed' };
 }
 
 function reportState(result: PipelineResult | null, report: PipelineResult['report'], errors: ContractError[]) {

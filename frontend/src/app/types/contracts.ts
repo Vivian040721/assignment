@@ -16,10 +16,13 @@ export type {
   PipelineResult,
   PublicConfig,
   RankingDetails,
+  ReplacementAttempt,
   ReportReference,
   ServiceInfo,
   Status,
   Summary,
+  TargetCoverage,
+  TargetCoverageEntry,
 } from '../../../../shared/contracts';
 
 import type { Conversation } from '../../../../shared/contracts';

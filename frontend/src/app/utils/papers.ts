@@ -1,4 +1,13 @@
-import type { ContractError, Job, Paper, PipelineResult, Summary } from '../types/contracts';
+import type {
+  ContractError,
+  Job,
+  Paper,
+  PipelineResult,
+  ReplacementAttempt,
+  Summary,
+  TargetCoverage,
+  TargetCoverageEntry,
+} from '../types/contracts';
 import {
   errorHint,
   errorLabel,
@@ -13,6 +22,7 @@ export interface PaperCollection {
   topPapers: Paper[];
   analysisPapers: Paper[];
   replacementPairs: Array<{ original: Paper | undefined; replacement: Paper | undefined; raw: Record<string, unknown> }>;
+  replacementAttempts: ReplacementAttempt[];
   paperById: Map<string, Paper>;
   summaries: Summary[];
 }
@@ -22,7 +32,10 @@ export function resultForJob(job: Job | null | undefined, fallback: PipelineResu
 }
 
 export function collectPapers(result: PipelineResult | null): PaperCollection {
-  if (!result) return { result: null, topPapers: [], analysisPapers: [], replacementPairs: [], paperById: new Map(), summaries: [] };
+  if (!result) return {
+    result: null, topPapers: [], analysisPapers: [], replacementPairs: [],
+    replacementAttempts: [], paperById: new Map(), summaries: [],
+  };
   const candidates = new Map<string, Paper>();
   for (const paper of result.papers ?? []) candidates.set(paper.paper_id, paper);
   const topPapers = (result.selected_papers ?? []).map(original => {
@@ -44,18 +57,70 @@ export function collectPapers(result: PipelineResult | null): PaperCollection {
   for (const item of replacementValues) {
     if (typeof item.replacement_paper_id === 'string') replacementIds.add(item.replacement_paper_id);
   }
+  const replacementAttempts = replacementAttemptsForResult(result);
+  const replacementAttemptIds = new Set(
+    replacementAttempts
+      .map(item => item.replacement_paper_id)
+      .filter((value): value is string => typeof value === 'string'),
+  );
   const analysisPapers = [...candidates.values()].filter(paper =>
-    !topIds.has(paper.paper_id) && !replacementIds.has(paper.paper_id) && analysisIds.has(paper.paper_id));
+    !topIds.has(paper.paper_id) && !replacementIds.has(paper.paper_id)
+    && !replacementAttemptIds.has(paper.paper_id) && analysisIds.has(paper.paper_id));
   const replacementPairs = replacementValues.map(raw => ({
     original: typeof raw.original_paper_id === 'string' ? topPapers.find(paper => paper.paper_id === raw.original_paper_id) : undefined,
     replacement: typeof raw.replacement_paper_id === 'string' ? candidates.get(raw.replacement_paper_id) : undefined,
     raw,
   }));
   const paperById = new Map<string, Paper>();
-  for (const paper of [...topPapers, ...analysisPapers, ...replacementPairs.flatMap(pair => [pair.original, pair.replacement]), ...candidates.values()]) {
+  const attemptPapers = replacementAttempts.flatMap(item => [
+    typeof item.original_paper_id === 'string' ? candidates.get(item.original_paper_id) ?? topPapers.find(paper => paper.paper_id === item.original_paper_id) : undefined,
+    typeof item.replacement_paper_id === 'string' ? candidates.get(item.replacement_paper_id) : undefined,
+  ]);
+  for (const paper of [...topPapers, ...analysisPapers, ...replacementPairs.flatMap(pair => [pair.original, pair.replacement]), ...attemptPapers, ...candidates.values()]) {
     if (paper) paperById.set(paper.paper_id, paper);
   }
-  return { result, topPapers, analysisPapers, replacementPairs, paperById, summaries: result.summaries ?? [] };
+  return {
+    result, topPapers, analysisPapers, replacementPairs, replacementAttempts,
+    paperById, summaries: result.summaries ?? [],
+  };
+}
+
+export function replacementAttemptsForResult(result: PipelineResult | null): ReplacementAttempt[] {
+  const values = Array.isArray(result?.metrics?.replacement_attempts)
+    ? result.metrics.replacement_attempts
+    : [];
+  return values
+    .filter((value): value is Record<string, unknown> => typeof value === 'object' && value !== null)
+    .filter(value => typeof value.replacement_paper_id === 'string')
+    .map(value => value as ReplacementAttempt);
+}
+
+export function targetCoverageForResult(result: PipelineResult | null): TargetCoverage | null {
+  const value = asRecord(result?.metrics?.target_coverage);
+  if (!value) return null;
+  const targets = Array.isArray(value.targets)
+    ? value.targets.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    : [];
+  if (!targets.length) return null;
+  return {
+    ...(value as TargetCoverage),
+    targets: targets
+      .filter(item => typeof item.target === 'string' && item.target.trim())
+      .map(item => item as unknown as TargetCoverageEntry),
+  };
+}
+
+export function paperIsCompleteFulltext(paper: Paper | undefined): boolean {
+  return Boolean(paper && paper.status === 'converted' && paper.fulltext_quality?.complete === true);
+}
+
+export function summaryIsComplete(summary: Summary | undefined): boolean {
+  return Boolean(
+    summary
+    && summary.summary_scope === 'fulltext'
+    && !(summary.errors?.length)
+    && Boolean(summary.overview?.trim() || summary.deep_analysis?.trim()),
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -201,19 +266,33 @@ export function paperStages(
   const replacementItems = Array.isArray(result?.metrics?.replacements)
     ? result!.metrics.replacements as unknown[]
     : [];
-  const replacement = replacementItems.some(item => asRecord(item)?.replacement_paper_id === paper.paper_id);
+  const replacementAttempt = replacementAttemptsForResult(result)
+    .find(item => item.replacement_paper_id === paper.paper_id);
+  const replacement = Boolean(replacementAttempt)
+    || replacementItems.some(item => asRecord(item)?.replacement_paper_id === paper.paper_id);
   const analysisIds = new Set(stringList(result?.metrics?.analysis_paper_ids));
   const attemptedIds = new Set(stringList(result?.metrics?.attempted_paper_ids));
+  for (const item of replacementAttemptsForResult(result)) {
+    if (typeof item.replacement_paper_id === 'string') attemptedIds.add(item.replacement_paper_id);
+  }
   const analyzed = analysisIds.has(paper.paper_id);
   const attempted = attemptedIds.has(paper.paper_id) || analyzed || selected || replacement;
   const complete = paper.fulltext_quality?.complete === true;
   const reportIds = new Set((result?.report?.references ?? []).map(reference => reference.paper_id));
   const paperReason = paper.errors?.length ? errorLabel(paper.errors[0]) : paper.error ?? '';
   const summaryErrors = summary?.errors ?? [];
-  const summaryReason = summaryErrors.length ? errorLabel(summaryErrors[0]) : '';
+  const summaryReason = summaryErrors.length
+    ? errorLabel(summaryErrors[0])
+    : summary && summary.summary_scope === 'fulltext' && !summaryIsComplete(summary)
+      ? '未完成整篇综合'
+      : '';
   const selectedDetail = selected
     ? `LLM 入选名次 #${paper.rank ?? '—'}`
-    : replacement ? '原始 Top-k 之外的全替补' : analyzed ? '候补进入实际分析' : undefined;
+    : replacementAttempt
+      ? (replacementAttempt.complete
+        ? '完整全文替补（原始 Top-k 审计保留）'
+        : replacementAttempt.in_analysis ? '部分全文替补进入分析' : '候补尝试未进入分析')
+      : replacement ? '原始 Top-k 之外的全替补' : analyzed ? '候补进入实际分析' : undefined;
   const downloadState: StageState = paper.pdf_path ? 'done'
     : attempted ? (terminal ? 'failed' : 'pending') : 'skipped';
   const downloadDetail = paper.pdf_path ? 'PDF 已保存'
@@ -230,14 +309,17 @@ export function paperStages(
   const summaryState: StageState = !summary
     ? analyzed ? (terminal ? 'failed' : 'pending') : 'skipped'
     : summary.summary_scope === 'failed' ? 'failed'
-      : summaryErrors.length ? 'partial'
-        : summary.summary_scope === 'fulltext' ? 'done' : 'partial';
+      : summaryIsComplete(summary) ? 'done' : 'partial';
   const summaryDetail = summary
     ? [summaryScopeLabel(summary.summary_scope), summaryReason].filter(Boolean).join(' · ')
     : analyzed ? (terminal ? (paperReason || '总结未返回') : '等待结果') : '未进入分析';
-  const reportState: StageState = reportIds.has(paper.paper_id) ? 'done'
+  const reportReferenced = reportIds.has(paper.paper_id);
+  const reportMetricsValid = result?.metrics?.report_valid;
+  const reportState: StageState = reportReferenced
+    ? (reportMetricsValid === true ? 'done' : 'partial')
     : terminal ? (analyzed ? 'failed' : 'skipped') : 'pending';
-  const reportDetail = reportIds.has(paper.paper_id) ? '已被报告引用'
+  const reportDetail = reportReferenced
+    ? (reportMetricsValid === true ? '已被有效报告引用' : '已被当前报告引用；报告未通过校验或有效性未记录')
     : terminal ? (analyzed ? (result?.report ? '未被当前报告引用' : '报告未生成') : '未进入报告')
       : '等待报告生成';
   return [

@@ -38,6 +38,32 @@ export interface ContractError {
   code?: string; stage?: string; message: string; paper_id?: string | null;
   retryable?: boolean; details?: Record<string, unknown>; [key: string]: unknown;
 }
+export interface TargetCoverageEntry {
+  target: string; normalized?: string;
+  status?: 'title_match' | 'abstract_mention' | 'not_retrieved' | string;
+  query?: string | null; query_covered?: boolean;
+  direct_title_paper_ids?: string[]; abstract_mention_paper_ids?: string[];
+  selector_pool_direct_paper_ids?: string[];
+  selected_paper_ids?: string[]; analysis_paper_ids?: string[];
+  complete_fulltext_paper_ids?: string[]; partial_fulltext_paper_ids?: string[];
+  summarized_paper_ids?: string[]; fulltext_summary_paper_ids?: string[];
+  partial_summary_paper_ids?: string[]; report_paper_ids?: string[];
+}
+export interface TargetCoverage {
+  explicit_targets?: string[]; targets?: TargetCoverageEntry[];
+  query_covered_targets?: string[]; query_uncovered_targets?: string[];
+  selector_pool_ids?: string[]; selected_paper_ids?: string[];
+  analysis_paper_ids?: string[]; report_reference_ids?: string[];
+  stage?: string; report_valid?: boolean;
+}
+export interface ReplacementAttempt {
+  attempt_order?: number; replacement_paper_id?: string; original_paper_id?: string | null;
+  status?: string; complete?: boolean; readable?: boolean;
+  failure_code?: string | null; failure_codes?: string[];
+  in_analysis?: boolean; summary_scope?: string | null; summary_complete?: boolean;
+  target_direct?: boolean; open_access_url?: boolean;
+  [key: string]: unknown;
+}
 export interface Paper {
   paper_id: string; title: string; authors: string[]; year?: number | null;
   abstract?: string; doi?: string | null; arxiv_id?: string | null; paper_url?: string | null;
