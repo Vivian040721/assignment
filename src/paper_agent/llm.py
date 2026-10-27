@@ -24,7 +24,11 @@ class LLMBudgetError(LLMError):
 
 
 class LLMOutputError(LLMError):
-    pass
+    """A sanitized output problem with a stable machine-readable reason."""
+
+    def __init__(self, message: str, *, reason: str = "invalid_output"):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -46,6 +50,54 @@ class LLMUsage:
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
+
+
+def _parse_json_object(raw: str) -> dict:
+    """Parse exactly one JSON object; fences/prose may not hide another value."""
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    if text.startswith("["):
+        raise ValueError("Top-level JSON value must be an object")
+    decoder = json.JSONDecoder()
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        start = text.find("{")
+        if start < 0:
+            raise
+        prefix = text[:start].rstrip()
+        if prefix.endswith("["):
+            raise ValueError("JSON object must not be nested in an array")
+        parsed, end = decoder.raw_decode(text[start:])
+        remainder = text[start + end:]
+        if remainder.lstrip().startswith("]"):
+            raise ValueError("JSON object must not be nested in an array")
+        # A deterministic prefix/suffix explanation is allowed, but a second
+        # JSON object or array after the first value is ambiguous and rejected.
+        scan = 0
+        while True:
+            positions = [index for index in (remainder.find("{", scan), remainder.find("[", scan))
+                         if index >= 0]
+            if not positions:
+                break
+            position = min(positions)
+            try:
+                value, _ = decoder.raw_decode(remainder[position:])
+            except ValueError:
+                scan = position + 1
+                continue
+            if isinstance(value, (dict, list)):
+                raise ValueError("Multiple JSON values are not allowed")
+            scan = position + 1
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON value must be an object")
+    return parsed
 
 
 @runtime_checkable
@@ -165,7 +217,8 @@ class ChatClient:
                     except (ValueError, UnicodeDecodeError):
                         self.usage.failed_requests += 1
                         entry["status"] = "invalid_response"
-                        raise LLMOutputError("Model endpoint returned invalid JSON") from None
+                        raise LLMOutputError("Model endpoint returned invalid JSON",
+                                             reason="invalid_json_response") from None
                     self._record_tokens(body, entry)
                     try:
                         message = self._message(body)
@@ -203,15 +256,18 @@ class ChatClient:
     def _message(body: Any) -> dict:
         choices = body.get("choices") if isinstance(body, dict) else None
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise LLMOutputError("Model endpoint returned no choices")
+            raise LLMOutputError("Model endpoint returned no choices", reason="missing_choices")
         choice = choices[0]
         if choice.get("finish_reason") in {"length", "content_filter"}:
-            raise LLMOutputError("Model response was truncated or filtered")
+            raise LLMOutputError("Model response was truncated or filtered",
+                                 reason="output_truncated")
         message = choice.get("message")
         if not isinstance(message, dict):
-            raise LLMOutputError("Model endpoint returned no assistant message")
+            raise LLMOutputError("Model endpoint returned no assistant message",
+                                 reason="missing_message")
         if not message.get("content") and not message.get("tool_calls"):
-            raise LLMOutputError("Model returned empty content and no tool calls")
+            raise LLMOutputError("Model returned empty content and no tool calls",
+                                 reason="empty_content")
         # Return the complete assistant message. In DeepSeek thinking mode this
         # includes reasoning_content, which must be echoed in later tool turns.
         return message
@@ -223,7 +279,7 @@ class ChatClient:
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             self.usage.invalid_outputs += 1
-            raise LLMOutputError("Model returned no text content")
+            raise LLMOutputError("Model returned no text content", reason="empty_text")
         return content
 
     async def json(self, system: str, user: str) -> dict:
@@ -236,18 +292,13 @@ class ChatClient:
         raw = message.get("content")
         if not isinstance(raw, str):
             self.usage.invalid_outputs += 1
-            raise LLMOutputError("Model returned no JSON text")
-        raw = raw.strip()
-        if raw.startswith("```") and raw.endswith("```"):
-            raw = "\n".join(raw.splitlines()[1:-1])
+            raise LLMOutputError("Model returned no JSON text", reason="missing_json_text")
         try:
-            parsed = json.loads(raw)
+            parsed = _parse_json_object(raw)
         except (ValueError, TypeError):
             self.usage.invalid_outputs += 1
-            raise LLMOutputError("Model text was not valid JSON") from None
-        if not isinstance(parsed, dict):
-            self.usage.invalid_outputs += 1
-            raise LLMOutputError("Model must return a JSON object")
+            raise LLMOutputError("Model text was not valid JSON",
+                                 reason="json_parse_failed") from None
         return parsed
 
     async def structured(
@@ -259,4 +310,5 @@ class ChatClient:
             return response_model.model_validate(parsed)
         except ValidationError:
             self.usage.invalid_outputs += 1
-            raise LLMOutputError("Model JSON did not satisfy the response schema") from None
+            raise LLMOutputError("Model JSON did not satisfy the response schema",
+                                 reason="schema_mismatch") from None

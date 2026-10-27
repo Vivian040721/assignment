@@ -3,6 +3,12 @@ import { kindLabel, stageLabel, toolLabel } from './labels';
 
 export type ToolCall = NonNullable<PipelineResult['tool_calls']>[number];
 
+export function eventMessage(event: EventItem): string {
+  if (event.message?.trim()) return event.message;
+  const value = event.data?.message;
+  return typeof value === 'string' ? value : '';
+}
+
 export function groupEvents(events: EventItem[]) {
   const groups = new Map<string, EventItem[]>();
   for (const event of events) {

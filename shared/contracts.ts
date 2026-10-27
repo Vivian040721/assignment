@@ -26,28 +26,74 @@ export interface Artifact {
   artifact_id: string; name: string; kind: 'pdf'|'markdown'|'summary'|'report'|'run';
   paper_id?: string | null; url?: string; download_url?: string;
 }
+export interface RankingDetails {
+  ranker?: string; algorithm?: string; keyword_rank?: number; semantic_rank?: number;
+  cosine_similarity?: number; rrf_rank?: number; rrf_score?: number; rrf_k?: number;
+  rrf_weights?: number[]; model_name?: string; score_semantics?: string;
+  title_coverage?: number; abstract_coverage?: number; topic_coverage?: number;
+  relative_recency?: number; query_tokens?: string[]; title_hits?: string[];
+  abstract_hits?: string[]; [key: string]: unknown;
+}
+export interface ContractError {
+  code?: string; stage?: string; message: string; paper_id?: string | null;
+  retryable?: boolean; details?: Record<string, unknown>; [key: string]: unknown;
+}
+export interface TargetCoverageEntry {
+  target: string; normalized?: string;
+  status?: 'title_match' | 'abstract_mention' | 'not_retrieved' | string;
+  query?: string | null; query_covered?: boolean;
+  direct_title_paper_ids?: string[]; abstract_mention_paper_ids?: string[];
+  selector_pool_direct_paper_ids?: string[];
+  selected_paper_ids?: string[]; analysis_paper_ids?: string[];
+  complete_fulltext_paper_ids?: string[]; partial_fulltext_paper_ids?: string[];
+  summarized_paper_ids?: string[]; fulltext_summary_paper_ids?: string[];
+  partial_summary_paper_ids?: string[]; report_paper_ids?: string[];
+}
+export interface TargetCoverage {
+  explicit_targets?: string[]; targets?: TargetCoverageEntry[];
+  query_covered_targets?: string[]; query_uncovered_targets?: string[];
+  selector_pool_ids?: string[]; selected_paper_ids?: string[];
+  analysis_paper_ids?: string[]; report_reference_ids?: string[];
+  stage?: string; report_valid?: boolean;
+}
+export interface ReplacementAttempt {
+  attempt_order?: number; replacement_paper_id?: string; original_paper_id?: string | null;
+  status?: string; complete?: boolean; readable?: boolean;
+  failure_code?: string | null; failure_codes?: string[];
+  in_analysis?: boolean; summary_scope?: string | null; summary_complete?: boolean;
+  target_direct?: boolean; open_access_url?: boolean;
+  [key: string]: unknown;
+}
 export interface Paper {
   paper_id: string; title: string; authors: string[]; year?: number | null;
   abstract?: string; doi?: string | null; arxiv_id?: string | null; paper_url?: string | null;
   sources: string[]; initial_score?: number | null; final_score?: number | null;
-  rank?: number | null; selection_reason?: string | null; ranking_reason?: string | null; status: string;
+  rank?: number | null; selection_reason?: string | null; ranking_reason?: string | null;
+  ranking_details?: RankingDetails; status: string;
   pdf_path?: string | null; markdown_path?: string | null; fulltext_quality?: Record<string, unknown>;
-  error?: string | null; errors?: { code?: string; stage?: string; message: string }[];
+  metadata?: Record<string, unknown>; error?: string | null; errors?: ContractError[];
 }
 export interface Summary {
   paper_id: string; title: string; summary_scope: string; markdown: string;
-  core_idea?: string; methods?: string[]; experiments?: string[]; findings?: string[];
-  limitations?: string[]; relevance?: string; evidence?: Record<string, unknown>[];
+  overview?: string; deep_analysis?: string;
+  research_question?: string; core_idea?: string; methods?: string[]; experiments?: string[];
+  findings?: string[]; limitations?: string[]; relevance?: string; evidence?: Record<string, unknown>[];
   author_claims?: string[]; system_inferences?: string[]; speculative_ideas?: string[];
-  warnings?: string[]; errors?: { code?: string; stage?: string; message: string }[];
+  warnings?: string[]; errors?: ContractError[]; summary_path?: string | null;
 }
+export interface ReportReference { paper_id: string; title: string; paper_url?: string | null; doi?: string | null; }
 export interface PipelineResult {
   run_id: string; idea: string; query: string; mode: string; execution_mode: string; top_k: number;
   status: Status; papers: Paper[]; selected_papers: Paper[]; summaries: Summary[];
-  report?: { markdown: string; overview?: string; report_path?: string | null; [key: string]: unknown } | null;
+  report?: {
+    markdown: string; overview?: string; report_path?: string | null; idea?: string;
+    related_work?: string[]; comparison?: Record<string, unknown>[]; researched_questions?: string[];
+    limitations?: string[]; research_directions?: string[]; references?: ReportReference[];
+    errors?: ContractError[]; [key: string]: unknown;
+  } | null;
   source_counts?: Record<string, number>; metrics: Record<string, unknown>;
-  errors: { code?: string; stage?: string; message: string; [key: string]: unknown }[];
-  timings?: { stage: string; duration_seconds?: number; wall_seconds?: number; request_count?: number; error_count?: number; [key: string]: unknown }[];
+  errors: ContractError[];
+  timings?: { stage: string; duration_seconds?: number; wall_seconds?: number; request_count?: number; success_count?: number; error_count?: number; [key: string]: unknown }[];
   tool_calls?: { tool: string; status: string; duration_seconds: number; arguments: Record<string, unknown>; controller?: string; error?: string | null }[];
 }
 export interface Message {

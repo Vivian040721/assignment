@@ -29,6 +29,18 @@ Give a single final_score in [0, 1] reflecting these dimensions. Prefer direct
 evidence over popularity or recency alone. Missing abstracts reduce confidence.
 Open-access/PDF availability is retrieval metadata, NOT academic relevance; do not
 reward downloadability or discard a more relevant paper just because its PDF is absent.
+When a candidate includes a ranking object, keyword_rank, semantic_rank and rrf_rank are
+one-based ordering evidence. rrf_score and cosine_similarity are ranking signals, never
+probabilities; use them only as context and still judge topical/method relevance yourself.
+The payload may include target_coverage for research objects explicitly named by the user.
+A direct title match is only a lexical clue that a paper may concern the named object; it
+does NOT verify that the paper is the original work. An abstract-only mention is weaker
+still. Judge from the actual title and abstract whether a candidate is the original work,
+a comparison/evaluation, a follow-up, or unrelated. When relevance is sufficient and you
+judge a candidate to be the original work, prefer it over a generic survey or derivative
+that merely discusses the object. Do not claim coverage that is absent, do not select a
+candidate solely because a target is named, and do not invent titles, IDs or scores.
+The final selection, order and scores remain your judgment; target hints never add candidates.
 Return exactly requested_count candidates, using unique consecutive ranks starting at 1 and
 nonincreasing final_score. Break exact score ties consistently by candidate order.
 Return exactly one JSON object with no extra fields:
@@ -82,7 +94,9 @@ def _input_units(payload: dict[str, Any]) -> int:
 
 
 def build_selection_payload(
-    idea: str, candidates: list[Paper], k: int, settings: Settings,
+    idea: str, candidates: list[Paper], k: int, settings: Settings, *,
+    targets: list[str] | None = None,
+    target_matches: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build bounded prompt data and a record of evidence truncation.
 
@@ -90,27 +104,78 @@ def build_selection_payload(
     cap, found by binary search; titles/IDs/idea are never silently truncated.
     If required metadata alone exceeds the budget, fail before making a request.
     """
-    records = [
-        {
+    candidate_ids = {p.paper_id for p in candidates}
+    matches_by_paper = (target_matches or {}).get("paper_matches", {})
+    records = []
+    for p in candidates:
+        details = p.ranking_details
+        ranking = {
+            key: details[key]
+            for key in ("ranker", "keyword_rank", "semantic_rank", "cosine_similarity",
+                        "rrf_rank", "rrf_score", "model_name")
+            if details.get(key) is not None
+        }
+        paper_matches = matches_by_paper.get(p.paper_id, {}) if isinstance(matches_by_paper, dict) else {}
+        direct_targets = [
+            value for value in paper_matches.get("direct_targets", [])
+            if isinstance(value, str) and value
+        ]
+        abstract_targets = [
+            value for value in paper_matches.get("abstract_targets", [])
+            if isinstance(value, str) and value
+        ]
+        record = {
             "paper_id": p.paper_id,
             "title": p.title,
             "abstract": "",
             "year": p.year,
             "sources": p.sources,
             "initial_score": p.initial_score,
+            **({"ranking": ranking} if ranking else {}),
             "open_access": {
                 "pdf_url_available": bool(p.pdf_url or p.pdf_urls),
                 "note": "Known PDF URL only; public accessibility has not been verified",
             },
         }
-        for p in candidates
-    ]
+        if direct_targets or abstract_targets:
+            record["target_matches"] = {
+                "direct_title": direct_targets,
+                "abstract_only": abstract_targets,
+            }
+        records.append(record)
     payload = {
         "idea": idea,
         "requested_count": min(k, len(candidates)),
         "evidence_scope": "title_abstract_only",
         "candidates": records,
     }
+    if targets:
+        coverage = []
+        for item in (target_matches or {}).get("targets", []):
+            target = item.get("target")
+            if not isinstance(target, str) or target not in targets:
+                continue
+            coverage.append({
+                "target": target,
+                "direct_title_candidate_ids": [
+                    paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+                "abstract_mention_candidate_ids": [
+                    paper_id for paper_id in item.get("abstract_mention_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+            })
+        payload["target_coverage"] = {
+            "explicit_targets": list(targets),
+            "matches": coverage,
+            "note": (
+                "Direct title match is only a lexical retrieval clue, not verified identity "
+                "or proof of original authorship. An abstract mention is weaker. Judge from "
+                "the actual titles and abstracts. Coverage is descriptive, never an "
+                "instruction to add or keep a candidate."
+            ),
+        }
     budget = settings.selector_input_token_budget or settings.llm_input_token_budget
     if _input_units(payload) > budget:
         raise SelectorError(
@@ -141,6 +206,23 @@ def build_selection_payload(
             for record, p in zip(records, candidates, strict=True)
         ],
     }
+    if targets:
+        audit["explicit_targets"] = list(targets)
+        audit["target_coverage"] = [
+            {
+                "target": item.get("target"),
+                "direct_title_candidate_ids": [
+                    paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+                "abstract_mention_candidate_ids": [
+                    paper_id for paper_id in item.get("abstract_mention_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+            }
+            for item in (target_matches or {}).get("targets", [])
+            if isinstance(item.get("target"), str) and item.get("target") in targets
+        ]
     return payload, audit
 
 
@@ -174,8 +256,12 @@ def validate_selection(
     return ordered
 
 
-def _initial_audit(papers: list[Paper], candidates: list[Paper], k: int) -> dict[str, Any]:
-    return {
+def _initial_audit(
+    papers: list[Paper], candidates: list[Paper], k: int,
+    targets: list[str] | None = None,
+    target_matches: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    audit = {
         "schema_version": 1,
         "agent": "llm_selector",
         "evidence_scope": "title_abstract_only",
@@ -185,6 +271,25 @@ def _initial_audit(papers: list[Paper], candidates: list[Paper], k: int) -> dict
         "submitted_candidate_order": [p.paper_id for p in candidates],
         "excluded_by_candidate_limit": [p.paper_id for p in papers[len(candidates):]],
     }
+    if targets:
+        candidate_ids = {p.paper_id for p in candidates}
+        audit["explicit_targets"] = list(targets)
+        audit["target_coverage"] = [
+            {
+                "target": item.get("target"),
+                "direct_title_candidate_ids": [
+                    paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+                "abstract_mention_candidate_ids": [
+                    paper_id for paper_id in item.get("abstract_mention_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+            }
+            for item in (target_matches or {}).get("targets", [])
+            if isinstance(item.get("target"), str) and item.get("target") in targets
+        ]
+    return audit
 
 
 def _fallback(
@@ -223,11 +328,15 @@ def _fallback(
 async def select_top_k(
     idea: str, papers: list[Paper], k: int, *,
     settings: Settings | None = None, llm: LLMClientProtocol | None = None,
+    targets: list[str] | None = None,
+    target_matches: dict[str, Any] | None = None,
 ) -> list[Paper]:
     """Rank via an injected/shared LLM and return independent full Paper copies.
 
     HTTP retries, concurrency and request budgets are owned by ChatClient. This
     layer never retries invalid JSON, authentication errors or semantic violations.
+    Target coverage is prompt context and audit only; it never rewrites the LLM's
+    chosen IDs or invents scores.
     """
     settings = settings or Settings.from_env()
     settings.validate()
@@ -243,9 +352,11 @@ async def select_top_k(
     if settings.candidate_limit < count:
         raise ValueError("候选上限必须覆盖请求的 Top-k")
     candidates = papers[:settings.candidate_limit]
-    audit = _initial_audit(papers, candidates, k)
+    audit = _initial_audit(papers, candidates, k, targets, target_matches)
     try:
-        payload, budget_audit = build_selection_payload(idea, candidates, count, settings)
+        payload, budget_audit = build_selection_payload(
+            idea, candidates, count, settings, targets=targets, target_matches=target_matches,
+        )
         audit.update(budget_audit)
         try:
             model = llm if llm is not None else ChatClient(settings)

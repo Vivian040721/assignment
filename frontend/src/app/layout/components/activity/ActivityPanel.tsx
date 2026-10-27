@@ -3,8 +3,8 @@ import { useWorkspaceState } from '../../../stores/workspaceStore';
 import { redactSensitiveData } from '../../../utils/redactSensitive';
 import { formatDate, formatDuration } from '../../../utils/format';
 import { statusLabel } from '../../../utils/status';
-import { errorLabel, kindLabel, stageLabel } from '../../../utils/labels';
-import { groupEvents, groupToolCalls } from '../../../utils/activity';
+import { errorHint, errorLabel, kindLabel, stageLabel } from '../../../utils/labels';
+import { eventMessage, groupEvents, groupToolCalls } from '../../../utils/activity';
 
 export function ActivityPanel() {
   const { activeJob, conversation } = useWorkspaceState();
@@ -22,7 +22,12 @@ export function ActivityPanel() {
     {job?.error && <div className="inline-error" role="alert">{job.error}</div>}
     {result?.errors?.length ? <section className="event-errors"><h3>错误与部分结果 <span>{result.errors.length}</span></h3>{result.errors.map((item, index) => <details className="activity-card activity-error" key={`${item.code ?? 'error'}:${index}`}>
       <summary><strong>{errorLabel(item)}</strong><span>{item.stage ? stageLabel(item.stage) : '任务'}</span></summary>
-      <div className="activity-card-body"><p>{item.message}</p><small>错误代码：{item.code ?? 'unknown'}</small></div>
+      <div className="activity-card-body">
+        <p>{item.message}</p>
+        <small>错误代码：{item.code ?? 'unknown'}</small>
+        {item.code && <p className="activity-error-hint">{errorHint(item.code)}</p>}
+        {item.details && Object.keys(item.details).length > 0 && <details className="activity-error-details"><summary>查看安全诊断定位</summary><pre>{JSON.stringify(redactSensitiveData(item.details), null, 2)}</pre></details>}
+      </div>
     </details>)}</section> : null}
     {toolGroups.length ? <section className="event-section"><h3>Agent 工具调用 <span>{toolCalls.length}</span></h3>{toolGroups.map(group => <details className={`activity-card ${group.hasError ? 'is-error' : ''}`} key={group.tool} open={group.hasError || undefined}>
       <summary><strong>{group.label}</strong><span>{group.items.length} 次 · {formatDuration(group.duration)}</span></summary>
@@ -41,7 +46,7 @@ export function ActivityPanel() {
       <div className="activity-card-body">
         <ol className="event-timeline">{group.items.map(event => <li key={`${job?.job_id ?? 'conversation'}:${event.seq}`} className={`event-${event.kind}`}>
           <span className="event-dot"/>
-          <div className="event-copy"><div className="event-heading">{event.stage && <strong>{stageLabel(event.stage)}</strong>}<span>{event.message ?? kindLabel(event.kind)}</span></div><time>{formatDate(event.timestamp)}</time>{event.data && Object.keys(event.data).length > 0 && <details><summary>查看事件数据</summary><pre>{JSON.stringify(redactSensitiveData(event.data), null, 2)}</pre></details>}</div>
+          <div className="event-copy"><div className="event-heading">{event.stage && <strong>{stageLabel(event.stage)}</strong>}<span>{eventMessage(event) || kindLabel(event.kind)}</span></div><time>{formatDate(event.timestamp)}</time>{event.data && Object.keys(event.data).length > 0 && <details><summary>查看事件数据</summary><pre>{JSON.stringify(redactSensitiveData(event.data), null, 2)}</pre></details>}</div>
         </li>)}</ol>
       </div>
     </details>)}</section> : null}

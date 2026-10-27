@@ -27,7 +27,7 @@ class Settings:
     llm_timeout: float = 120
     llm_max_steps: int = 8
     chunk_chars: int = 12000
-    max_chunks: int = 12
+    max_chunks: int = 16
     openalex_api_key: str = field(default="", repr=False)
     http_timeout: float = 30
     http_proxy: str = ""
@@ -97,7 +97,7 @@ class Settings:
             llm_timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
             llm_max_steps=int(os.getenv("LLM_MAX_STEPS", "8")),
             chunk_chars=int(os.getenv("LLM_CHUNK_CHARS", "12000")),
-            max_chunks=int(os.getenv("LLM_MAX_CHUNKS", "12")),
+            max_chunks=int(os.getenv("LLM_MAX_CHUNKS", "16")),
             openalex_api_key=os.getenv("OPENALEX_API_KEY", ""),
             http_timeout=float(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
             http_proxy=os.getenv("PAPER_AGENT_HTTP_PROXY", ""),

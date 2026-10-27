@@ -109,12 +109,26 @@ class DemoLLM:
                          "page_number": segment.get("page_number"),
                          "section": segment.get("section"), "quote": segment["text"][:140],
                          "claim": "This is fixture text, not an empirical finding.",
-                         "evidence_type": "author_claim"}]
-            return self._summary(evidence)
+                         "evidence_type": "author_claim",
+                         "source_segment_id": segment.get("segment_id")}]
+            return {
+                "research_question": "DEMO ONLY: verify the local research workflow.",
+                "core_idea": "Keep stable identifiers and traceable fixture evidence.",
+                "methods": ["Synthetic dependency injection; not a scientific method result."],
+                "experiments": ["No real experiment was conducted."],
+                "findings": ["No empirical finding is asserted."],
+                "limitations": ["Fixtures cannot validate real paper relevance or LLM quality."],
+                "author_claims": ["The supplied document labels itself as a synthetic fixture."],
+                "system_inferences": [], "speculative_ideas": [], "evidence": evidence,
+            }
         if task == "merge_paper_summary":
-            evidence = [entry for summary in payload["chunk_summaries"]
-                        for entry in summary.get("evidence", [])]
-            return self._summary(evidence[:3])
+            evidence_ids = list(dict.fromkeys(
+                evidence_id for summary in payload["chunk_summaries"]
+                for evidence_id in summary.get("evidence_ids", [])
+            ))
+            return self._summary([
+                {"evidence_id": evidence_id} for evidence_id in evidence_ids[:3]
+            ])
         if task == "generate_research_report":
             summaries = payload["summaries"]
             ids = [summary["paper_id"] for summary in summaries]
@@ -132,7 +146,9 @@ class DemoLLM:
 
     @staticmethod
     def _summary(evidence: list[dict]) -> dict:
-        return {"research_question": "DEMO ONLY: verify the local research workflow.",
+        return {"overview": "DEMO ONLY: synthetic fixture overview; no real paper was analyzed.",
+                "deep_analysis": "## 演示说明\n\n这是离线合成样例，只验证接口与证据保存，不代表真实论文结论。",
+                "research_question": "DEMO ONLY: verify the local research workflow.",
                 "core_idea": "Keep stable identifiers and traceable fixture evidence.",
                 "methods": ["Synthetic dependency injection; not a scientific method result."],
                 "experiments": ["No real experiment was conducted."],

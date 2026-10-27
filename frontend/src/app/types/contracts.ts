@@ -4,6 +4,7 @@ export type {
   ArtifactText,
   BenchmarkFile,
   ConfigUpdate,
+  ContractError,
   Conversation,
   ConversationSummary,
   DesktopAPI,
@@ -14,9 +15,14 @@ export type {
   Paper,
   PipelineResult,
   PublicConfig,
+  RankingDetails,
+  ReplacementAttempt,
+  ReportReference,
   ServiceInfo,
   Status,
   Summary,
+  TargetCoverage,
+  TargetCoverageEntry,
 } from '../../../../shared/contracts';
 
 import type { Conversation } from '../../../../shared/contracts';

@@ -6,6 +6,8 @@ import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStor
 import { isJobActive, statusLabel } from '../../../utils/status';
 import { formatDate } from '../../../utils/format';
 import { errorLabel, kindLabel, stageLabel } from '../../../utils/labels';
+import { isTerminalResult, partialReasons, rankingForResult, rankingModeLabel } from '../../../utils/papers';
+import { eventMessage } from '../../../utils/activity';
 import { layoutStore, useLayoutState } from '../../stores/layoutStore';
 import { MarkdownContent } from '../common/MarkdownContent';
 
@@ -94,6 +96,17 @@ export function Conversation() {
   const result = state.activeJob?.result ?? state.conversation?.result;
   const analysisIds = result?.metrics?.analysis_paper_ids;
   const analysisCount = Array.isArray(analysisIds) ? analysisIds.length : 0;
+  const ranking = rankingForResult(result ?? null);
+  const rankingFallback = ranking?.requested === 'semantic' && ranking.actual !== 'semantic';
+  const reasons = result ? partialReasons(result) : [];
+  const incompleteReasons = reasons.filter(reason => reason.kind === 'partial');
+  const shownReasons = incompleteReasons.length ? incompleteReasons : reasons;
+  const showPartialNote = Boolean(result && isTerminalResult(result)
+    && ['partial', 'failed', 'cancelled'].includes(result.status));
+  const fulltextSummaryValue = result?.metrics?.fulltext_summary_count;
+  const fulltextSummaryCount = typeof fulltextSummaryValue === 'number' ? fulltextSummaryValue : null;
+  const replacementValue = result?.metrics?.replacements;
+  const replacementCount = Array.isArray(replacementValue) ? replacementValue.length : 0;
   return <main className="conversation-shell" aria-label="研究对话">
     <header className="conversation-header">
       <div className="conversation-heading"><span className="header-kicker">研究空间</span><h1 title={title}>{title}</h1></div>
@@ -120,20 +133,28 @@ export function Conversation() {
           <div className="live-progress-head"><span className={`live-dot ${jobActive ? 'is-live' : ''}`}/><strong>{jobActive ? '实时进度' : '任务进度'}</strong><span>{liveEvents.length ? `最近 ${liveEvents.length} 条` : '等待事件'}</span></div>
           {liveEvents.length ? <ol role="log" aria-live="polite" aria-relevant="additions text">{liveEvents.map(event => <li key={`${event.seq}:${event.kind}`}>
             <span className="live-stage">{event.stage ? stageLabel(event.stage) : kindLabel(event.kind)}</span>
-            <span className="live-message">{event.message || (event.kind === 'trace' ? '阶段记录' : kindLabel(event.kind))}</span>
+            <span className="live-message">{eventMessage(event) || (event.kind === 'trace' ? '阶段记录' : kindLabel(event.kind))}</span>
             <time>{formatDate(event.timestamp)}</time>
           </li>)}</ol> : <p>正在等待服务端记录进度…</p>}
           {state.activeJob.error && <p className="live-error" role="alert">{errorLabel({ message: state.activeJob.error })}</p>}
         </section>}
-        {result && <button className="result-link" type="button" onClick={() => layoutStore.openPanel('report')}><FileText size={16}/><span>{result.status === 'completed' ? '研究报告已就绪' : `研究结果：${statusLabel(result.status)}`}</span><span className="result-paper-count">{result.selected_papers.length} 篇原始 Top-k</span><ArrowUp size={14}/></button>}
+        {result && <button className="result-link" type="button" onClick={() => layoutStore.openPanel('report')}><FileText size={16}/><span>{result.metrics?.report_valid === true ? (result.status === 'completed' || result.status === 'demo_completed' ? '研究报告已就绪' : '部分结果报告已生成') : '研究结果与报告状态可查看'}</span><span className="result-paper-count">{result.selected_papers.length} 篇原始 Top-k</span><ArrowUp size={14}/></button>}
         {result && <div className="result-facts">
           <span>来源 <strong>{Object.entries(result.source_counts ?? {}).map(([name, count]) => `${name} ${count}`).join(' · ') || '—'}</strong></span>
+          <span>排序 <strong>{rankingModeLabel(ranking)}{rankingFallback ? '（已降级）' : ''}</strong></span>
           <span>候选 <strong>{result.papers?.length ?? 0}</strong></span>
           <span>分析 <strong>{analysisCount}</strong></span>
-          <span>总结 <strong>{result.summaries?.length ?? 0}</strong></span>
+          <span>全文总结 <strong>{fulltextSummaryCount ?? '—'}</strong></span>
+          <span>替补 <strong>{replacementCount}</strong></span>
           <span>工具 <strong>{result.tool_calls?.length ?? 0}</strong></span>
         </div>}
-        {result && result.status !== 'completed' && result.status !== 'demo_completed' && <div className="partial-note">任务保留了部分结果。<button type="button" className="inline-link-button" onClick={() => layoutStore.openPanel('activity')}>查看活动记录</button></div>}
+        {showPartialNote && <div className="partial-note">
+          <strong>部分结果原因</strong>
+          {shownReasons.length
+            ? <span>{shownReasons.slice(0, 2).map(reason => reason.title).join('；')}{shownReasons.length > 2 ? `；另有 ${shownReasons.length - 2} 类` : ''}。</span>
+            : <span>任务保留了已完成的内容；未完成阶段不会显示为成功。</span>}
+          <button type="button" className="inline-link-button" onClick={() => layoutStore.openPanel('activity')}>查看活动记录</button>
+        </div>}
         {state.activeJob?.error && <div className="job-error" role="alert"><CircleAlert size={16}/><span>{state.activeJob.error}</span><button type="button" className="inline-link-button" onClick={() => layoutStore.openPanel('activity')}>查看活动记录</button></div>}
       </div>
     </div>
