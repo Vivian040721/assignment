@@ -15,7 +15,7 @@ from paper_agent.agents.research_agent import (
 )
 from paper_agent.config import Settings
 from paper_agent.llm_client import LLMBudgetError
-from paper_agent.models import PageMapping, Paper, PaperSummary, ResearchReport
+from paper_agent.models import ErrorInfo, PageMapping, Paper, PaperSummary, ResearchReport
 
 
 def test_model_prompts_require_chinese_prose_without_translating_citations():
@@ -53,19 +53,31 @@ def settings_at(tmp_path, **kwargs):
 
 def content_for(request):
     if request["task"] == "merge_paper_summary":
-        response = dict(request["chunk_summaries"][0])
-        for field in ("methods", "experiments", "findings", "limitations", "evidence", "author_claims"):
-            response[field] = [value for summary in request["chunk_summaries"] for value in summary[field]]
+        notes = request["chunk_summaries"]
+        response = {
+            "overview": "本文根据提供的原文讨论方法、实验及其局限。",
+            "deep_analysis": "## 方法与证据\n\n仅综合提供的分块笔记。\n\n"
+                             "## 系统推断\n\n解释仍需验证。\n\n"
+                             "## 未经验证的研究设想\n\n尚未开展独立实验。",
+            "research_question": notes[0]["research_question"],
+            "core_idea": notes[0]["core_idea"],
+            "relevance": "This supplied evidence is relevant to the idea.",
+            "evidence": [{"evidence_id": item["evidence_id"]}
+                         for item in request["verified_evidence"]],
+        }
+        for field in ("methods", "experiments", "findings", "limitations", "author_claims",
+                      "system_inferences", "speculative_ideas"):
+            response[field] = [value for note in notes for value in note[field]]
         return response
     segment = next(segment for segment in request["segments"] if segment["text"].strip())
     quote = segment["text"].strip()[:80]
     evidence = {"paper_id": request["paper"]["paper_id"], "page_number": segment["page_number"],
                 "section": segment["section"], "quote": quote, "claim": "A source-bounded finding.",
-                "evidence_type": "author_claim"}
+                "evidence_type": "author_claim", "source_segment_id": segment["segment_id"]}
     return {"research_question": "How can the described method work?", "core_idea": "Use the supplied evidence.",
             "methods": ["A method in the supplied text."], "experiments": ["Experiment for " + quote],
             "findings": ["A source-bounded finding."], "limitations": ["Limitation for " + quote],
-            "relevance": "This supplied evidence is relevant to the idea.", "author_claims": ["A source-bounded finding."],
+            "author_claims": ["A source-bounded finding."],
             "system_inferences": ["This interpretation needs validation."], "speculative_ideas": [], "evidence": [evidence]}
 
 
@@ -115,11 +127,17 @@ async def test_fulltext_quotes_pages_and_json_artifacts(tmp_path):
     assert Path(summary.summary_path).parent == (tmp_path / "data" / "summaries")
     persisted = json.loads(Path(summary.summary_path).with_suffix(".json").read_text(encoding="utf-8"))
     assert persisted["summary_scope"] == "fulltext"
+    assert persisted["overview"] and persisted["deep_analysis"]
     assert "系统推断" in summary.markdown and "未经验证的研究设想" in summary.markdown
-    assert model.requests[0][1]["task"] == "summarize_chunk"
+    assert [request["task"] for _, request in model.requests] == [
+        "summarize_chunk", "merge_paper_summary",
+    ]
+    assert "source_segment_id" not in persisted["evidence"][0]
+    assert "evidence_id" not in persisted["evidence"][0]
 
 
-@pytest.mark.parametrize("bad", ["page", "section", "quote", "id", "scope", "extra", "no_evidence"])
+@pytest.mark.parametrize("bad", ["page", "section", "quote", "id", "scope", "extra",
+                                 "no_evidence", "segment", "enum", "evidence_id", "missing_field"])
 @run_async
 async def test_rejects_model_fabrication(tmp_path, bad):
     def mutate(request, response):
@@ -135,6 +153,14 @@ async def test_rejects_model_fabrication(tmp_path, bad):
             response["summary_scope"] = "fulltext"
         elif bad == "extra":
             response["summary_path"] = "C:/do-not-trust.md"
+        elif bad == "segment":
+            response["evidence"][0]["source_segment_id"] = "unknown-segment"
+        elif bad == "enum":
+            response["evidence"][0]["evidence_type"] = "作者主张"
+        elif bad == "evidence_id":
+            response["evidence"][0]["evidence_id"] = "e1"
+        elif bad == "missing_field":
+            response.pop("findings")
         else:
             response["evidence"] = []
         return response
@@ -143,6 +169,53 @@ async def test_rejects_model_fabrication(tmp_path, bad):
     assert result.summary_scope == "failed"
     assert any(error.code == "invalid_model_output" for error in result.errors)
     assert not result.evidence
+
+
+@pytest.mark.parametrize("bad", ["unknown_id", "duplicate_id", "rewritten_record"])
+@run_async
+async def test_merge_rejects_unverified_evidence_and_preserves_chunk_notes(tmp_path, bad):
+    def mutate(request, response):
+        if request["task"] != "merge_paper_summary":
+            return response
+        if bad == "unknown_id":
+            response["evidence"][0]["evidence_id"] = "unknown-evidence"
+        elif bad == "duplicate_id":
+            response["evidence"].append(dict(response["evidence"][0]))
+        else:
+            response["evidence"][0]["quote"] = "A forged replacement quote."
+        return response
+
+    model = RecordingLLM(mutate)
+    summary = await summarize_paper("memory", full_paper(tmp_path), settings=settings_at(tmp_path), llm=model)
+    assert not summary.overview and not summary.deep_analysis
+    assert summary.experiments and summary.evidence
+    error = next(error for error in summary.errors if error.code == "invalid_model_output")
+    assert error.details["stage"] == "merge"
+    assert error.details["repair_attempted"] is True
+    assert all(evidence.quote != "A forged replacement quote." for evidence in summary.evidence)
+    assert [request["task"] for _, request in model.requests] == [
+        "summarize_chunk", "merge_paper_summary", "merge_paper_summary",
+    ]
+
+
+@run_async
+async def test_chunk_and_merge_share_one_repair_per_paper(tmp_path):
+    def mutate(request, response):
+        if request["task"] == "summarize_chunk" and "repair_context" not in request:
+            response["evidence"][0]["source_segment_id"] = "unknown-segment"
+        elif request["task"] == "merge_paper_summary":
+            response["evidence"][0]["evidence_id"] = "unknown-evidence"
+        return response
+
+    model = RecordingLLM(mutate)
+    summary = await summarize_paper("memory", full_paper(tmp_path), settings=settings_at(tmp_path), llm=model)
+    assert [request["task"] for _, request in model.requests] == [
+        "summarize_chunk", "summarize_chunk", "merge_paper_summary",
+    ]
+    assert sum("repair_context" in request for _, request in model.requests) == 1
+    assert not summary.overview and not summary.deep_analysis
+    assert summary.evidence
+    assert summary.errors[0].details["stage"] == "merge"
 
 
 @run_async
@@ -233,7 +306,17 @@ async def test_merge_input_budget_does_not_drop_verified_notes(tmp_path):
     settings = settings_at(tmp_path, chunk_chars=1000, max_chunks=20, llm_input_token_budget=3500)
     summary = await summarize_paper("memory", paper, settings=settings, llm=model)
     assert summary.summary_scope == "fulltext"
-    assert "不再进行二次综合" in " ".join(summary.warnings)
+    assert not summary.overview and not summary.deep_analysis
+    error = next(error for error in summary.errors if error.code == "llm_budget")
+    assert error.details["stage"] == "merge" and error.details["reason"] == "input_budget"
+    assert "未完成整篇综合" in " ".join(summary.warnings)
+    assert all(request["task"] == "summarize_chunk" for _, request in model.requests)
+    expected = [content_for(request) for _, request in model.requests]
+    assert set(summary.experiments) == {value for note in expected for value in note["experiments"]}
+    assert set(summary.limitations) == {value for note in expected for value in note["limitations"]}
+    assert {evidence.quote for evidence in summary.evidence} == {
+        evidence["quote"] for note in expected for evidence in note["evidence"]
+    }
     for system, request in model.requests:
         size = len((system + json.dumps(request, ensure_ascii=False, separators=(",", ":"))).encode("utf-8")) + 64
         assert size <= settings.llm_input_token_budget
@@ -265,6 +348,8 @@ async def test_error_messages_do_not_leak_model_exceptions(tmp_path):
 
 def usable_summaries(count=3, scope="fulltext"):
     return [PaperSummary(paper_id=f"p{index}", title=f"Paper {index}", summary_scope=scope,
+                         overview="A source-bounded overview.",
+                         deep_analysis="A paper-level synthesis of the supplied evidence.",
                          research_question="A question", core_idea="An idea", findings=["A bounded finding."])
             for index in range(1, count + 1)]
 
@@ -307,15 +392,61 @@ async def test_report_with_fewer_than_three_or_abstracts_is_partial(tmp_path):
 
 
 @run_async
-async def test_report_overbudget_rejects_without_clipping_summaries(tmp_path):
+async def test_report_compacts_prompt_without_modifying_source_summaries(tmp_path):
     summaries = usable_summaries()
     summaries[0].experiments = ["Large experiment evidence. " * 2000]
+    original = [summary.model_dump() for summary in summaries]
     model = RecordingLLM()
     report = await generate_report("memory", summaries, settings=settings_at(
         tmp_path, llm_input_token_budget=4000, report_input_token_budget=4000), llm=model)
-    assert report.errors[0].code == "llm_budget"
+    assert {error.code for error in report.errors} == {"partial_report"}
+    error = report.errors[0]
+    assert error.details["reason"] == "report_input_compacted"
+    assert error.details["compact_level"] in (1, 2, 3)
+    assert "有界摘录" in report.limitations[0]
+    assert [summary.model_dump() for summary in summaries] == original
+    assert len(model.requests) == 1
+    system, request = model.requests[0]
+    assert len((system + json.dumps(request, ensure_ascii=False, separators=(",", ":"))).encode("utf-8")) + 64 <= 4000
+    assert request["allowed_paper_ids"] == ["p1", "p2", "p3"]
+    excerpt = request["summaries"][0]["experiments"][0]
+    assert summaries[0].experiments[0].startswith(excerpt)
+    assert len(excerpt) < len(summaries[0].experiments[0])
+    assert "experiments" in request["summaries"][0]["compacted_fields"]
+    assert {reference.paper_id for reference in report.references} == {"p1", "p2", "p3"}
+
+
+@run_async
+async def test_report_unfit_even_after_compaction_rejects_without_llm(tmp_path):
+    summaries = usable_summaries()
+    original = [summary.model_dump() for summary in summaries]
+    model = RecordingLLM()
+    report = await generate_report("memory", summaries, settings=settings_at(
+        tmp_path, report_input_token_budget=1000), llm=model)
+    assert {error.code for error in report.errors} == {"llm_budget"}
+    assert report.errors[0].details["compacted"] is True
+    assert not report.overview
     assert not model.requests
     assert len(report.references) == 3
+    assert [summary.model_dump() for summary in summaries] == original
+
+
+@pytest.mark.parametrize("incomplete", ["overview", "deep_analysis", "error"])
+@run_async
+async def test_report_preserves_incomplete_paper_synthesis_status(tmp_path, incomplete):
+    summaries = usable_summaries()
+    if incomplete == "error":
+        summaries[0].errors.append(ErrorInfo(
+            code="llm_budget", stage="summarize", message="Fixture merge budget",
+        ))
+    else:
+        setattr(summaries[0], incomplete, "")
+    report = await generate_report("memory", summaries, settings=settings_at(tmp_path), llm=RecordingLLM())
+    assert {error.code for error in report.errors} == {"partial_report"}
+    assert report.errors[0].details["incomplete_summary_ids"] == ["p1"]
+    assert report.errors[0].details["summary_error_codes"]["p1"] == [
+        "llm_budget" if incomplete == "error" else "missing_paper_level_synthesis"
+    ]
 
 
 @run_async
