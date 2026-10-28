@@ -13,7 +13,7 @@ import {
 } from 'electron';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, readFile, stat } from 'node:fs/promises';
+import { copyFile, open, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installWindowShortcuts } from './shortcuts';
@@ -24,6 +24,7 @@ import type {
   ConversationSummary,
   Job,
   JobEvent,
+  PdfArtifact,
   PublicConfig,
   ServiceInfo,
 } from '../shared/contracts';
@@ -53,6 +54,7 @@ const API_VERSION = 3;
 const DEV_ORIGIN = 'http://127.0.0.1:5173';
 const JOB_EVENT_CHANNEL = 'jobs:event';
 const MAX_RESPONSE_CHARS = 50 * 1024 * 1024;
+const MAX_PDF_BYTES = 100 * 1024 * 1024;
 const MAIN_DIR = __dirname;
 const DEV_REPO_ROOT = path.resolve(MAIN_DIR, '..', '..');
 const RENDERER_FILE = path.resolve(app.getAppPath(), 'frontend', 'dist', 'index.html');
@@ -437,6 +439,37 @@ function safeFilename(location: ArtifactLocation): { filePath: string; extension
   return { filePath: path.resolve(location.path), extension };
 }
 
+async function readRegisteredPdf(location: ArtifactLocation): Promise<PdfArtifact> {
+  const { filePath } = safeFilename(location);
+  if (location.kind !== 'pdf' || path.extname(location.name).toLowerCase() !== '.pdf') {
+    throw new DesktopError('此文件不是可读取的 PDF。');
+  }
+  const file = await open(filePath, 'r').catch(() => {
+    throw new DesktopError('PDF 文件不存在或已移走。');
+  });
+  try {
+    const fileStats = await file.stat();
+    if (!fileStats.isFile() || fileStats.size < 1 || fileStats.size > MAX_PDF_BYTES) {
+      throw new DesktopError('PDF 文件为空或超过 100 MB 读取上限。');
+    }
+    const data = await file.readFile();
+    if (data.byteLength < 1 || data.byteLength > MAX_PDF_BYTES ||
+        !data.subarray(0, Math.min(data.byteLength, 1024)).includes('%PDF-')) {
+      throw new DesktopError('文件内容不是有效的 PDF。');
+    }
+    return {
+      data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+      name: location.name,
+      kind: 'pdf',
+    };
+  } catch (error) {
+    if (error instanceof DesktopError) throw error;
+    throw new DesktopError('PDF 文件读取失败。');
+  } finally {
+    await file.close();
+  }
+}
+
 function registerIpc(): void {
   registerHandler('service:info', async () => {
     const endpoint = await service.ensure();
@@ -510,6 +543,11 @@ function registerIpc(): void {
     const artifactId = validateId(rawArtifactId, '文件标识');
     const route = `/api/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/text`;
     return service.request<ArtifactText>(route, { method: 'GET' }, validateArtifactText);
+  });
+  registerHandler('artifacts:read-pdf', async (_event, rawJobId: unknown, rawArtifactId: unknown) => {
+    const jobId = validateId(rawJobId, '任务标识');
+    const artifactId = validateId(rawArtifactId, '文件标识');
+    return readRegisteredPdf(await service.openJobArtifact(jobId, artifactId));
   });
   registerHandler('artifacts:open', async (_event, rawJobId: unknown, rawArtifactId: unknown) => {
     const location = await service.openJobArtifact(validateId(rawJobId, '任务标识'), validateId(rawArtifactId, '文件标识'));

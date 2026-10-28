@@ -1,16 +1,16 @@
 import { useEffect, useState } from 'react';
-import { ArrowUpRight, BookOpen, Copy, FileDown, FileText } from 'lucide-react';
-import type { Artifact, Job } from '../../../types/contracts';
+import { ArrowUpRight, BookOpen, Copy, Download, FileText, FolderOpen, MoreHorizontal } from 'lucide-react';
+import type { Artifact, EvidenceReference, Job } from '../../../types/contracts';
 import type { LayoutTab } from '../../../types/ui';
 import { desktopApi } from '../../../services/desktopApi';
 import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStore';
-import { collectPapers, isTerminalResult, isTerminalStatus, paperStatusLabel, scoreShort, summaryScopeLabel } from '../../../utils/papers';
+import { collectPapers, summaryScopeLabel, summaryStatus, summaryStatusLabel } from '../../../utils/papers';
 import { safeHttpUrl } from '../../../utils/format';
-import { errorHint, errorLabel, paperErrorLabel } from '../../../utils/labels';
+import { canLocatePdfEvidence } from '../../../utils/pdf';
 import { MarkdownContent } from '../common/MarkdownContent';
-import { PaperProgress, PaperRankingDetails } from '../common/ResultInsights';
+import { PdfViewer } from './PdfViewer';
 
-type ReaderView = 'summary' | 'fulltext';
+type ReaderView = 'summary' | 'pdf';
 
 export function PaperReader({ tab }: { tab: LayoutTab }) {
   const { activeJob, resultJob, conversation, loadingConversation } = useWorkspaceState();
@@ -45,22 +45,34 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
   const summary = collection.summaries.find(item => item.paper_id === tab.paperId);
   const artifacts = job?.artifacts ?? [];
   const markdownArtifact = artifacts.find(item => item.kind === 'markdown' && item.paper_id === tab.paperId);
-  const pdfArtifact = artifacts.find(item => item.kind === 'pdf' && item.paper_id === tab.paperId);
-  const [view, setView] = useState<ReaderView>(summary?.markdown ? 'summary' : 'fulltext');
+  const registeredPdf = artifacts.find(item => item.kind === 'pdf' && item.paper_id === tab.paperId);
+  const fallbackPdf = paper?.pdf_artifact_id
+    ? { artifact_id: paper.pdf_artifact_id, name: `${paper.title}.pdf`, kind: 'pdf', paper_id: paper.paper_id } satisfies Artifact
+    : undefined;
+  const defaultPdfArtifact = registeredPdf ?? fallbackPdf;
+  const [view, setView] = useState<ReaderView>(summary?.markdown ? 'summary' : defaultPdfArtifact ? 'pdf' : 'summary');
+  const [selectedPdfId, setSelectedPdfId] = useState<string | null>(null);
+  const [requestedPage, setRequestedPage] = useState(1);
+  const [jumpRevision, setJumpRevision] = useState(0);
+  const [showFulltext, setShowFulltext] = useState(false);
   const [fulltext, setFulltext] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
-    setView(summary?.markdown ? 'summary' : 'fulltext');
+    setView(summary?.markdown ? 'summary' : defaultPdfArtifact ? 'pdf' : 'summary');
+    setSelectedPdfId(null);
+    setRequestedPage(1);
+    setJumpRevision(0);
+    setShowFulltext(false);
     setFulltext(null);
     setTruncated(false);
     setLocalError(null);
-  }, [tab.paperId, summary?.markdown]);
+  }, [tab.paperId, tab.jobId]);
 
   useEffect(() => {
-    if (view !== 'fulltext' || !job || !markdownArtifact) return;
+    if (!showFulltext || !job || !markdownArtifact) return;
     let current = true;
     setLoading(true);
     setLocalError(null);
@@ -74,7 +86,7 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
       if (current) setLoading(false);
     });
     return () => { current = false; };
-  }, [view, job?.job_id, markdownArtifact?.artifact_id]);
+  }, [showFulltext, job?.job_id, markdownArtifact?.artifact_id]);
 
   if ((loadingConversation || remoteLoading) && !paper) {
     return <div className="dock-panel-skeleton" aria-live="polite">
@@ -84,24 +96,31 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
   if (remoteError) return <div className="panel-empty"><span><FileText size={20}/></span><strong>所属任务暂时不可读取</strong><p>{remoteError}</p></div>;
   if (!paper) return <div className="panel-empty"><span><FileText size={20}/></span><strong>该论文不在所属任务结果中</strong><p>论文标签会保留最近打开的任务上下文；可在标签栏关闭后从当前结果重新打开。</p></div>;
 
-  const hasSummary = Boolean(summary?.markdown);
-  const hasFulltext = Boolean(markdownArtifact);
+  const selectedPdfArtifact = selectedPdfId
+    ? artifacts.find(item => item.artifact_id === selectedPdfId && item.kind === 'pdf')
+      ?? { artifact_id: selectedPdfId, name: `${paper.title}.pdf`, kind: 'pdf', paper_id: paper.paper_id }
+    : defaultPdfArtifact;
   const readingText = view === 'summary'
-    ? (summary?.deep_analysis?.trim() || summary?.markdown || '')
-    : fulltext ?? (hasFulltext ? '' : `## 摘要\n\n${paper.abstract || '当前结果没有提供论文摘要。'}\n\n> 当前没有返回可读取的全文。`);
+    ? (summary?.deep_analysis?.trim() || summary?.markdown || (paper.abstract ? `## 摘要\n\n${paper.abstract}` : ''))
+    : '';
   const sourceUrl = safeHttpUrl(paper.paper_url);
-  const selected = Boolean(collection.result?.selected_papers.some(item => item.paper_id === paper.paper_id));
-  const terminal = job ? isTerminalStatus(job.status) : isTerminalResult(collection.result);
-  const summaryErrors = summary?.errors ?? [];
-  const paperErrors = paper.errors ?? [];
+  const derivedSummaryStatus = summaryStatus(summary);
+  const analysisIds = collection.result?.metrics?.analysis_paper_ids;
+  const analyzed = Array.isArray(analysisIds) && analysisIds.includes(paper.paper_id);
+  const summaryStatusText = summary
+    ? `${summaryStatusLabel(derivedSummaryStatus)} · ${summaryScopeLabel(summary.summary_scope)}`
+    : analyzed ? '总结缺失' : '未进入总结';
   const summaryOverview = summary
     ? (summary.overview?.trim() || summary.core_idea?.trim() || summary.relevance?.trim() || '')
     : '';
+  const evidence = summary?.evidence ?? [];
+  const hasProcessingLimitations = Boolean(summary?.errors?.length || paper.errors?.length || paper.error);
+
   const copy = async () => {
     if (!readingText) return;
     try {
       await desktopApi().copyText(readingText);
-      workspaceStore.setNotice('论文内容已复制。');
+      workspaceStore.setNotice('研究笔记已复制。');
     } catch (error) {
       workspaceStore.setError(error instanceof Error ? error.message : String(error));
     }
@@ -114,6 +133,15 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
       workspaceStore.setError(error instanceof Error ? error.message : String(error));
     }
   };
+  const exportArtifact = async (artifact: Artifact) => {
+    if (!job) return;
+    try {
+      const response = await desktopApi().exportArtifact(job.job_id, artifact.artifact_id);
+      workspaceStore.setNotice(response.cancelled ? '已取消下载。' : response.path ? `已下载到：${response.path}` : '下载完成。');
+    } catch (error) {
+      workspaceStore.setError(error instanceof Error ? error.message : String(error));
+    }
+  };
   const openSource = async () => {
     if (!sourceUrl) return;
     try {
@@ -122,51 +150,76 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
       workspaceStore.setError(error instanceof Error ? error.message : String(error));
     }
   };
+  const locateEvidence = (item: EvidenceReference) => {
+    if (!canLocatePdfEvidence(item)) return;
+    setSelectedPdfId(item.pdf_artifact_id!);
+    setRequestedPage(item.page_number!);
+    setJumpRevision(value => value + 1);
+    setView('pdf');
+  };
 
   return <article className="reader-view">
     <header className="reader-header">
       <div className="reader-icon"><BookOpen size={17}/></div>
       <div className="reader-title">
-        <span>{summary?.summary_scope
-          ? `${summaryScopeLabel(summary.summary_scope)}${summaryErrors.length ? ' · 校验有错误' : ''}`
-          : paperStatusLabel(paper.status)}</span>
-        <h2>{paper.title}</h2>
+        <span>{summaryStatusText}</span>
+        <h2 title={paper.title}>{paper.title}</h2>
         <p>{paper.authors.join(', ')}{paper.year ? ` · ${paper.year}` : ''}</p>
-        <div className="paper-tags">
-          <span>{paperStatusLabel(paper.status)}</span>
-          <span>{scoreShort(paper)}</span>
-          {typeof paper.rank === 'number' ? <span>{selected ? 'LLM 入选' : '候选'}名次 #{paper.rank}</span> : null}
-          {paper.pdf_path ? <span>PDF 已保存</span> : null}
-          {paper.markdown_path ? <span>{paper.fulltext_quality?.complete === true ? '完整 Markdown' : '部分 Markdown'}</span> : null}
-        </div>
       </div>
+      <details className="reader-more">
+        <summary className="icon-button" aria-label="更多论文操作" title="更多操作"><MoreHorizontal size={17}/></summary>
+        <div className="reader-more-menu">
+          {defaultPdfArtifact && <button type="button" onClick={() => void openArtifact(defaultPdfArtifact)}><FolderOpen size={14}/>在外部打开 PDF</button>}
+          {defaultPdfArtifact && <button type="button" onClick={() => void exportArtifact(defaultPdfArtifact)}><Download size={14}/>下载 PDF</button>}
+          {sourceUrl && <button type="button" onClick={() => void openSource()}><ArrowUpRight size={14}/>打开论文来源页面</button>}
+        </div>
+      </details>
     </header>
-    <PaperProgress paper={paper} summary={summary} result={collection.result} terminal={terminal}/>
-    {paper.selection_reason ? <div className="scope-note"><span>LLM 入选依据</span><strong>{paper.selection_reason}</strong></div> : null}
-    {summaryOverview && <section className="summary-overview" aria-label="全文概览">
-      <span>全文概览</span>
-      <p>{summaryOverview}</p>
-    </section>}
-    <PaperRankingDetails paper={paper} selected={selected}/>
-    {summaryErrors.length ? <details className="reader-diagnostics is-error">
-      <summary>校验状态（{summaryErrors.length}）</summary>
-      <ul>{summaryErrors.map((error, index) => <li key={`${error.code ?? 'error'}:${index}`}><strong>{errorLabel(error)}</strong><span>{errorHint(error.code)}{error.code ? ` · ${error.code}` : ''}</span></li>)}</ul>
-    </details> : null}
-    {hasSummary && hasFulltext && <div className="reader-switch" role="tablist" aria-label={`${paper.title} 阅读视图`}>
-      <button type="button" role="tab" aria-selected={view === 'summary'} className={view === 'summary' ? 'is-active' : ''} onClick={() => setView('summary')}>单篇报告</button>
-      <button type="button" role="tab" aria-selected={view === 'fulltext'} className={view === 'fulltext' ? 'is-active' : ''} onClick={() => setView('fulltext')}>全文阅读</button>
-    </div>}
-    <div className="reader-actions">
-      <button className="subtle-button" type="button" disabled={!readingText} onClick={() => void copy()}><Copy size={14}/>复制</button>
-      {hasFulltext && <button className="subtle-button" type="button" onClick={() => setView('fulltext')}><BookOpen size={14}/>阅读全文</button>}
-      {pdfArtifact && <button className="subtle-button" type="button" onClick={() => void openArtifact(pdfArtifact)}><FileDown size={14}/>打开 PDF</button>}
-      {sourceUrl && <button className="subtle-button" type="button" onClick={() => void openSource()}><ArrowUpRight size={14}/>原文链接</button>}
+
+    <div className="reader-switch" role="tablist" aria-label={`${paper.title} 阅读视图`}>
+      <button type="button" role="tab" aria-selected={view === 'summary'} className={view === 'summary' ? 'is-active' : ''} onClick={() => setView('summary')}>研究笔记</button>
+      <button type="button" role="tab" aria-selected={view === 'pdf'} className={view === 'pdf' ? 'is-active' : ''} disabled={!selectedPdfArtifact} onClick={() => setView('pdf')}>PDF 原文</button>
     </div>
-    {view === 'fulltext' && hasFulltext && <p className="fulltext-source-note">全文由 PyMuPDF4LLM 从 PDF 提取并保存为 Markdown，可直接在应用内阅读。</p>}
-    {loading ? <div className="reader-loading" aria-live="polite"><span className="skeleton-line wide"/><span className="skeleton-line"/><span className="skeleton-line medium"/><span className="skeleton-line wide"/></div> : readingText ? <MarkdownContent text={readingText}/> : null}
-    {truncated && <div className="inline-warning" role="status">全文超过 2 MiB，当前仅显示服务端返回的截断内容。</div>}
-    {localError && <div className="inline-error" role="alert">全文读取失败：{localError}</div>}
-    {paperErrors.length ? <div className="inline-warning" role="status">{paperErrors.map((item, index) => <span key={`${item.code ?? 'error'}:${index}`}>{errorLabel(item)}{index < paperErrors.length - 1 ? '；' : ''}</span>)}</div> : paperErrorLabel(paper) ? <div className="inline-warning" role="status">{paperErrorLabel(paper)}</div> : null}
-    {!summary && !markdownArtifact && <p className="reader-limitation">服务端未返回这篇论文的全文文件。此处只显示实际提供的摘要，不会将摘要标成全文。</p>}
+    {!selectedPdfArtifact && <p className="reader-limitation">本次结果没有可定位的 PDF artifact；不会把 PDF 候选链接或 Markdown 当作已获取原文。</p>}
+
+    {view === 'summary' ? <>
+      {summaryOverview && <section className="summary-overview" aria-label="研究笔记概览"><span>研究笔记概览</span><p>{summaryOverview}</p></section>}
+      {paper.selection_reason ? <div className="scope-note"><span>精选依据</span><strong>{paper.selection_reason}</strong></div> : null}
+      {(derivedSummaryStatus === 'failed' || derivedSummaryStatus === 'missing') && analyzed && <div className="inline-warning" role="status">
+        {derivedSummaryStatus === 'failed'
+          ? '这篇论文的研究笔记未完成，现有内容不会按完整分析交付。'
+          : '这篇论文进入了分析，但没有返回研究笔记；不会默认显示为部分成功。'}
+      </div>}
+      {hasProcessingLimitations && <div className="inline-warning" role="status">这篇论文的获取、阅读或校验存在缺口，关键结论请结合原文核对；原始诊断位于执行记录。</div>}
+      <div className="reader-actions"><button className="subtle-button" type="button" disabled={!readingText} onClick={() => void copy()}><Copy size={14}/>复制研究笔记</button></div>
+      {readingText ? <MarkdownContent text={readingText}/> : <div className="panel-empty compact-empty"><span><FileText size={19}/></span><strong>没有可读研究笔记</strong><p>当前结果未提供这篇论文的摘要或研究笔记。</p></div>}
+      {evidence.length > 0 && <section className="evidence-list" aria-label="研究笔记证据与页码">
+        <h3>证据与原文定位</h3>
+        <ol>{evidence.map((item, index) => {
+          const locatable = canLocatePdfEvidence(item);
+          return <li key={`${item.paper_id}:${item.page_number ?? 'none'}:${index}`}>
+            {(item.quote || item.claim) && <p>{item.quote || item.claim}</p>}
+            <div>{item.section && <span>{item.section}</span>}{typeof item.page_number === 'number' && (locatable
+              ? <button type="button" onClick={() => locateEvidence(item)}>跳到 PDF 第 {item.page_number} 页</button>
+              : <span className="evidence-unlocatable">第 {item.page_number} 页 · 不可定位</span>)}{typeof item.page_number !== 'number' && <span className="evidence-unlocatable">未保存 PDF 页码 · 不可定位</span>}</div>
+          </li>;
+        })}</ol>
+      </section>}
+    </> : job && selectedPdfArtifact ? <PdfViewer
+      key={`${selectedPdfArtifact.artifact_id}:${jumpRevision}`}
+      jobId={job.job_id}
+      artifact={selectedPdfArtifact}
+      initialPage={requestedPage}
+    /> : <div className="inline-warning">所属任务或 PDF artifact 不可用，无法读取原文。</div>}
+
+    {markdownArtifact && <details className="technical-details reader-technical-details">
+      <summary>查看提取的 Markdown</summary>
+      <p>该文本由服务端从 PDF 提取，只用于核对；阅读原文请使用上方 PDF。</p>
+      {loading && <div className="reader-loading" aria-live="polite"><span className="skeleton-line wide"/><span className="skeleton-line"/></div>}
+      {fulltext && <MarkdownContent text={fulltext}/>}
+      {truncated && <div className="inline-warning" role="status">全文超过 2 MiB，当前仅显示服务端返回的截断内容。</div>}
+      {localError && <div className="inline-error" role="alert">Markdown 读取失败：{localError}</div>}
+    </details>}
+    {!summary && !markdownArtifact && !selectedPdfArtifact && <p className="reader-limitation">服务端未返回这篇论文的全文文件。此处只显示实际提供的摘要，不会将摘要标成全文。</p>}
   </article>;
 }

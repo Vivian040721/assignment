@@ -138,6 +138,36 @@ def test_mime_type_pdf_link_without_title_is_accepted():
     assert paper.pdf_url == "https://arxiv.org/pdf/2410.12345v2.pdf"
 
 
+def test_pdf_candidate_must_match_entry_version_and_remain_unacquired():
+    paper, = source.parse_feed(feed(entry(
+        pdf=False,
+        extra=(
+            '<link title="pdf" href="https://arxiv.org/pdf/2410.12345v1"/>'
+            '<link title="pdf" href="https://arxiv.org/pdf/2410.12345v2"/>'
+        ),
+    )))
+    assert paper.arxiv_version == "v2"
+    assert paper.paper_url == "https://arxiv.org/abs/2410.12345v2"
+    assert paper.pdf_url == "https://arxiv.org/pdf/2410.12345v2"
+    assert paper.pdf_urls == [paper.pdf_url]
+    assert paper.source_records[0]["pdf_url"] == paper.pdf_url
+    assert paper.status == "metadata_only"
+    assert paper.acquisition_status is None
+    assert paper.pdf_path is None
+    assert paper.pdf_artifact_id is None
+
+
+@pytest.mark.parametrize("identifier", ["2410.12345", "2410.12345v1", "2410.12345v3"])
+def test_pdf_candidate_with_different_version_is_not_used(identifier):
+    paper, = source.parse_feed(feed(entry(pdf=False, extra=(
+        f'<link title="pdf" href="https://arxiv.org/pdf/{identifier}"/>'
+    ))))
+    assert paper.arxiv_version == "v2"
+    assert paper.pdf_url is None
+    assert paper.pdf_urls == []
+    assert paper.source_records[0]["pdf_url"] is None
+
+
 def test_query_keywords_and_explicit_field_syntax():
     assert source.build_query("large language model") == 'all:"large" AND all:"language" AND all:"model"'
     explicit = 'ti:"agent memory" OR abs:"experience reuse"'
@@ -793,3 +823,20 @@ def test_pagination_limit_2000_compensates_duplicate_beyond_first_50_pages(gate,
     assert len(papers[0].source_records) == 1
     assert requests == [(start, 40) for start in range(0, 2000, 40)] + [(2000, 1)]
     assert gate.intervals == [3.0] * 51
+
+
+def test_owned_client_ignores_ambient_proxy(monkeypatch, gate, settings):
+    captured = {}
+    original_client = httpx.AsyncClient
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return original_client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, text=feed(entry()))),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(source.httpx, "AsyncClient", factory)
+    papers = asyncio.run(source.search_arxiv("memory", 1, settings=settings))
+    assert [paper.paper_id for paper in papers] == ["arxiv:2410.12345"]
+    assert captured["trust_env"] is False

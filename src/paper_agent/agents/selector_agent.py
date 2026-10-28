@@ -33,14 +33,20 @@ When a candidate includes a ranking object, keyword_rank, semantic_rank and rrf_
 one-based ordering evidence. rrf_score and cosine_similarity are ranking signals, never
 probabilities; use them only as context and still judge topical/method relevance yourself.
 The payload may include target_coverage for research objects explicitly named by the user.
-A direct title match is only a lexical clue that a paper may concern the named object; it
-does NOT verify that the paper is the original work. An abstract-only mention is weaker
-still. Judge from the actual title and abstract whether a candidate is the original work,
+Identity levels are lexical clues, not identity verification: title_direct means the
+normalized name starts a title and the rest is subtitle; title_related means the
+title contains the name with a prefix, suffix or modifier and may be an extension,
+variant or downstream application; abstract_only is weaker still. identity_status
+stays unconfirmed for a short name unless it is explicitly confirmed_by_user_title.
+Judge from the actual title and abstract whether a candidate is the original work,
 a comparison/evaluation, a follow-up, or unrelated. When relevance is sufficient and you
 judge a candidate to be the original work, prefer it over a generic survey or derivative
-that merely discusses the object. Do not claim coverage that is absent, do not select a
-candidate solely because a target is named, and do not invent titles, IDs or scores.
+that merely discusses the object. Do not claim coverage that is absent, do not treat a
+related variant as the original, do not select a candidate solely because a target is
+named, and do not invent titles, IDs or scores.
 The final selection, order and scores remain your judgment; target hints never add candidates.
+When the named object is not covered by a judged original, say so explicitly in the
+relevant selection_reason instead of implying that a derivative covers it.
 Return exactly requested_count candidates, using unique consecutive ranks starting at 1 and
 nonincreasing final_score. Break exact score ties consistently by candidate order.
 Return exactly one JSON object with no extra fields:
@@ -120,6 +126,10 @@ def build_selection_payload(
             value for value in paper_matches.get("direct_targets", [])
             if isinstance(value, str) and value
         ]
+        related_targets = [
+            value for value in paper_matches.get("related_targets", [])
+            if isinstance(value, str) and value
+        ]
         abstract_targets = [
             value for value in paper_matches.get("abstract_targets", [])
             if isinstance(value, str) and value
@@ -137,9 +147,10 @@ def build_selection_payload(
                 "note": "Known PDF URL only; public accessibility has not been verified",
             },
         }
-        if direct_targets or abstract_targets:
+        if direct_targets or related_targets or abstract_targets:
             record["target_matches"] = {
-                "direct_title": direct_targets,
+                "title_direct": direct_targets,
+                "title_related": related_targets,
                 "abstract_only": abstract_targets,
             }
         records.append(record)
@@ -157,8 +168,15 @@ def build_selection_payload(
                 continue
             coverage.append({
                 "target": target,
-                "direct_title_candidate_ids": [
+                "identity_status": item.get("identity_status"),
+                "identity_confirmed": item.get("identity_confirmed"),
+                "identity_basis": item.get("identity_basis", []),
+                "title_direct_candidate_ids": [
                     paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+                "title_related_candidate_ids": [
+                    paper_id for paper_id in item.get("related_title_paper_ids", [])
                     if paper_id in candidate_ids
                 ],
                 "abstract_mention_candidate_ids": [
@@ -170,10 +188,11 @@ def build_selection_payload(
             "explicit_targets": list(targets),
             "matches": coverage,
             "note": (
-                "Direct title match is only a lexical retrieval clue, not verified identity "
-                "or proof of original authorship. An abstract mention is weaker. Judge from "
-                "the actual titles and abstracts. Coverage is descriptive, never an "
-                "instruction to add or keep a candidate."
+                "Title matches are lexical retrieval clues, not verified identity. "
+                "title_direct may be the original but identity_status stays unconfirmed "
+                "for a short name; title_related may be an extension, variant or downstream "
+                "application. Judge from the actual titles and abstracts. Coverage is "
+                "descriptive, never an instruction to add or keep a candidate."
             ),
         }
     budget = settings.selector_input_token_budget or settings.llm_input_token_budget
@@ -211,8 +230,15 @@ def build_selection_payload(
         audit["target_coverage"] = [
             {
                 "target": item.get("target"),
-                "direct_title_candidate_ids": [
+                "identity_status": item.get("identity_status"),
+                "identity_confirmed": item.get("identity_confirmed"),
+                "identity_basis": item.get("identity_basis", []),
+                "title_direct_candidate_ids": [
                     paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+                "title_related_candidate_ids": [
+                    paper_id for paper_id in item.get("related_title_paper_ids", [])
                     if paper_id in candidate_ids
                 ],
                 "abstract_mention_candidate_ids": [
@@ -256,6 +282,89 @@ def validate_selection(
     return ordered
 
 
+async def _request_valid_selection(
+    model: LLMClientProtocol,
+    payload: dict[str, Any],
+    candidates: list[Paper],
+    count: int,
+    settings: Settings,
+    audit: dict[str, Any],
+) -> list[SelectionItem]:
+    """Retry only recoverable model-output problems, with sanitized feedback.
+
+    ChatClient already owns bounded transport/HTTP retries. Repeating those here
+    would multiply requests and could retry authentication failures. Invalid JSON
+    and semantic output violations instead receive bounded JSON repair attempts.
+    """
+    request_payload = payload
+    attempts: list[dict[str, Any]] = []
+    audit.update(
+        attempts=attempts,
+        llm_call_count=0,
+        output_retry_count=0,
+        output_retry_limit=settings.llm_max_retries,
+    )
+    for attempt in range(settings.llm_max_retries + 1):
+        try:
+            value = await model.json(SELECTOR_SYSTEM_PROMPT, _json(request_payload))
+        except LLMOutputError:
+            failure = SelectorError(
+                "selector_invalid_output", "Selector model did not return valid JSON"
+            )
+        except Exception:
+            # Do not propagate third-party messages, response bodies or secrets.
+            failure = SelectorError(
+                "selector_llm_failure", "Selector model call failed; inspect sanitized LLM counters"
+            )
+            attempts.append({
+                "attempt": attempt + 1, "status": "failed", "code": failure.error.code,
+                "retry_scheduled": False,
+            })
+            audit["llm_call_count"] = attempt + 1
+            raise failure from None
+        else:
+            try:
+                ranked = validate_selection(value, candidates, count)
+            except SelectorError as exc:
+                failure = exc
+            else:
+                attempts.append({
+                    "attempt": attempt + 1, "status": "succeeded",
+                    "code": None, "retry_scheduled": False,
+                })
+                audit["llm_call_count"] = attempt + 1
+                return ranked
+
+        can_retry = attempt < settings.llm_max_retries
+        attempts.append({
+            "attempt": attempt + 1, "status": "failed", "code": failure.error.code,
+            "retry_scheduled": can_retry,
+        })
+        audit["llm_call_count"] = attempt + 1
+        audit["output_retry_count"] = attempt + int(can_retry)
+        if not can_retry:
+            raise failure
+        logger.warning(
+            "Selector output retry scheduled: attempt=%d code=%s",
+            attempt + 1, failure.error.code,
+        )
+        repair_payload = {
+            **payload,
+            "output_repair": {
+                "previous_error_code": failure.error.code,
+                "previous_error": failure.error.message,
+                "instruction": (
+                    "Correct the previous output. Return one complete JSON object that "
+                    "satisfies the original schema, candidate IDs, count, ranks and scores."
+                ),
+            },
+        }
+        budget = settings.selector_input_token_budget or settings.llm_input_token_budget
+        # Retry feedback is useful but must not bypass the original input bound.
+        request_payload = repair_payload if _input_units(repair_payload) <= budget else payload
+    raise AssertionError("Selector retry loop must return or raise")
+
+
 def _initial_audit(
     papers: list[Paper], candidates: list[Paper], k: int,
     targets: list[str] | None = None,
@@ -277,8 +386,15 @@ def _initial_audit(
         audit["target_coverage"] = [
             {
                 "target": item.get("target"),
-                "direct_title_candidate_ids": [
+                "identity_status": item.get("identity_status"),
+                "identity_confirmed": item.get("identity_confirmed"),
+                "identity_basis": item.get("identity_basis", []),
+                "title_direct_candidate_ids": [
                     paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                    if paper_id in candidate_ids
+                ],
+                "title_related_candidate_ids": [
+                    paper_id for paper_id in item.get("related_title_paper_ids", [])
                     if paper_id in candidate_ids
                 ],
                 "abstract_mention_candidate_ids": [
@@ -334,7 +450,8 @@ async def select_top_k(
     """Rank via an injected/shared LLM and return independent full Paper copies.
 
     HTTP retries, concurrency and request budgets are owned by ChatClient. This
-    layer never retries invalid JSON, authentication errors or semantic violations.
+    layer adds bounded repair retries for invalid JSON and semantic violations,
+    but does not retry authentication, configuration or generic transport errors.
     Target coverage is prompt context and audit only; it never rewrites the LLM's
     chosen IDs or invents scores.
     """
@@ -360,17 +477,13 @@ async def select_top_k(
         audit.update(budget_audit)
         try:
             model = llm if llm is not None else ChatClient(settings)
-            value = await model.json(SELECTOR_SYSTEM_PROMPT, _json(payload))
-        except LLMOutputError:
-            raise SelectorError(
-                "selector_invalid_output", "Selector model did not return valid JSON"
-            ) from None
         except Exception:
-            # Do not propagate third-party messages, response bodies or secrets.
             raise SelectorError(
-                "selector_llm_failure", "Selector model call failed; inspect sanitized LLM counters"
+                "selector_llm_failure", "Selector model initialization failed"
             ) from None
-        ranked = validate_selection(value, candidates, count)
+        ranked = await _request_valid_selection(
+            model, payload, candidates, count, settings, audit,
+        )
     except SelectorError as failure:
         if settings.selector_fallback == "initial_ranking":
             return _fallback(candidates, count, audit, failure)

@@ -20,7 +20,11 @@ from typing import Any
 
 from paper_agent.config import Settings
 from paper_agent.models import ErrorInfo, PageMapping, Paper
-from paper_agent.services.pdf_runtime import PDF_PARSE_LOCK
+from paper_agent.services.pdf_runtime import (
+    PDF_PARSE_LOCK,
+    refresh_reading_status,
+    stable_artifact_id,
+)
 
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="paper-pdf")
 _MIN_TEXT_CHARS = 20
@@ -86,16 +90,37 @@ def _atomic_write(path: Path, text: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _failure(paper: Paper, code: str, message: str) -> Paper:
+def _failure(
+    paper: Paper,
+    code: str,
+    message: str,
+    previous_markdown: dict[str, Any] | None = None,
+) -> Paper:
     paper.status = "conversion_failed"
+    paper.conversion_status = "failed"
     paper.error = message
-    paper.markdown_path = None
-    paper.page_map = []
-    paper.fulltext_quality.setdefault("complete", False)
-    paper.fulltext_quality["complete"] = False
+    preserved = False
+    if previous_markdown and previous_markdown.get("path"):
+        try:
+            preserved = Path(previous_markdown["path"]).is_file()
+        except OSError:
+            preserved = False
+    if preserved:
+        # A failed refresh must not make a previously readable artifact disappear.
+        paper.markdown_path = previous_markdown["path"]
+        paper.page_map = previous_markdown["page_map"]
+        paper.fulltext_quality = previous_markdown["quality"]
+        paper.markdown_artifact_id = stable_artifact_id("markdown", paper.paper_id)
+    else:
+        paper.markdown_path = None
+        paper.markdown_artifact_id = None
+        paper.page_map = []
+        paper.fulltext_quality.setdefault("complete", False)
+        paper.fulltext_quality["complete"] = False
     paper.errors.append(ErrorInfo(
         code=code, message=message, stage="conversion", paper_id=paper.paper_id,
     ))
+    refresh_reading_status(paper)
     return paper
 
 
@@ -135,7 +160,14 @@ class PDFConverter:
         )
 
     def _convert_sync(self, paper: Paper) -> Paper:
+        previous_markdown = {
+            "path": paper.markdown_path,
+            "page_map": paper.page_map,
+            "quality": paper.fulltext_quality,
+        }
         paper.fulltext_quality = {"complete": False, "page_count": 0, "extracted_pages": 0}
+        if paper.acquisition_status is None:
+            paper.acquisition_status = "not_attempted"
         try:
             if not paper.pdf_path:
                 raise PDFConversionError("missing_pdf", "没有可用的 PDF 路径。")
@@ -161,6 +193,8 @@ class PDFConverter:
                 with document:
                     if not document.is_pdf:
                         raise PDFConversionError("invalid_pdf", "文件不是有效 PDF。")
+                    paper.acquisition_status = "downloaded"
+                    paper.pdf_artifact_id = stable_artifact_id("pdf", paper.paper_id)
                     if document.needs_pass:
                         raise PDFConversionError("encrypted_pdf", "PDF 需要密码。")
                     page_count = document.page_count
@@ -189,15 +223,16 @@ class PDFConverter:
             mappings: list[PageMapping] = []
             offset = 0
             for number in range(1, page_count + 1):
-                marker = f"<!-- PDF page {number} -->\n\n"
-                contents.append(marker)
-                offset += len(marker)
-                text = pages.get(number, "")
+                # Include the generator's physical-page marker in the mapped span.
+                # Empty/missing parser pages therefore retain a real, non-empty
+                # Markdown interval instead of a zero-width or fabricated mapping.
+                text = f"<!-- PDF page {number} -->\n\n" + pages.get(number, "")
+                end = offset + len(text)
                 mappings.append(PageMapping(
-                    page_number=number, text=text, start_char=offset, end_char=offset + len(text),
+                    page_number=number, text=text, start_char=offset, end_char=end,
                 ))
                 contents.extend((text, "\n\n"))
-                offset += len(text) + 2
+                offset = end + 2
             markdown = "".join(contents)
             quality = _quality(source_pages, pages)
             paper.fulltext_quality = quality
@@ -208,12 +243,13 @@ class PDFConverter:
                     code, message = "garbled_text", "PDF text is unreadable or badly encoded."
                 else:
                     code, message = "no_extractable_text", "PDF has no usable extractable text."
-                return _failure(paper, code, message)
+                return _failure(paper, code, message, previous_markdown)
             target = Path(self.settings.markdown_dir) / (
                 hashlib.sha256(paper.paper_id.encode("utf-8")).hexdigest() + ".md"
             )
             _atomic_write(target, markdown)
             paper.markdown_path = str(target.resolve())
+            paper.markdown_artifact_id = stable_artifact_id("markdown", paper.paper_id)
             paper.page_map = mappings
             paper.metadata["conversion"] = {
                 "parser": "pymupdf4llm.legacy", "parser_version": "1.28.2",
@@ -222,8 +258,10 @@ class PDFConverter:
             }
             if quality["complete"]:
                 paper.status, paper.error = "converted", None
+                paper.conversion_status = "converted"
             else:
                 paper.status = "partial_fulltext"
+                paper.conversion_status = "partial"
                 paper.error = "PDF 文本覆盖不完整，请查看全文质量信息。"
                 paper.errors.append(ErrorInfo(
                     code="partial_extraction", message=paper.error, stage="conversion",
@@ -231,14 +269,15 @@ class PDFConverter:
                     details={"missing_pages": quality["missing_pages"],
                              "unusable_pages": quality["unusable_pages"]},
                 ))
+            refresh_reading_status(paper)
             return paper
         except PDFConversionError as exc:
-            return _failure(paper, exc.code, str(exc))
+            return _failure(paper, exc.code, str(exc), previous_markdown)
         except OSError:
-            return _failure(paper, "conversion_io_error", "PDF 或 Markdown 文件操作失败。")
+            return _failure(paper, "conversion_io_error", "PDF 或 Markdown 文件操作失败。", previous_markdown)
         except Exception:
             # Return per-paper failure without logging potentially sensitive paths.
-            return _failure(paper, "conversion_failed", "PDF 转换发生未预期错误。")
+            return _failure(paper, "conversion_failed", "PDF 转换发生未预期错误。", previous_markdown)
 
 
 def _quality(source_pages: list[dict[str, Any]], pages: dict[int, str]) -> dict[str, Any]:
@@ -283,6 +322,8 @@ def _quality(source_pages: list[dict[str, Any]], pages: dict[int, str]) -> dict[
         "garbled_pages": garbled, "suspected_scanned_pages": scanned,
         "suspected_text_loss_pages": loss, "page_quality": page_quality,
         "ocr_enabled": False, "quality_scope": "text_layer_coverage_heuristic",
+        "semantic_completeness": "not_assessed",
+        "formula_table_layout_verified": False,
         "warnings": warnings,
     }
 

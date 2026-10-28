@@ -13,6 +13,18 @@ from starlette.requests import Request
 
 from paper_agent import service_control
 from paper_agent.config import Settings
+from paper_agent.llm_client import LLMOutputError
+from paper_agent.models import (
+    EvidenceReference,
+    Finding,
+    KeyPaper,
+    NextStep,
+    Paper,
+    PaperSummary,
+    PipelineResult,
+    ResearchBrief,
+    ResearchReport,
+)
 from paper_agent.service_control import (
     API_VERSION,
     descriptor_path,
@@ -49,7 +61,8 @@ def _app_at(tmp_path: Path):
     endpoint = {"pid": 1234, "api_version": API_VERSION, "url": "http://127.0.0.1:43871",
                 "mcp_url": "http://127.0.0.1:43871/mcp", "data_root": str(root), "token": TOKEN}
     app = create_app(root, endpoint, lambda: None, settings=_settings(tmp_path))
-    manager = Workbench(_settings(tmp_path), root=root / "service", config_path=root / "config.json")
+    manager = Workbench(_settings(tmp_path), root=root / "service", config_path=root / "config.json",
+                        private_secrets=(TOKEN,))
     app.state.workbench = manager
     app.state.service_data_root = root
     return app, manager, endpoint
@@ -236,12 +249,12 @@ def test_job_events_and_artifact_payloads_redact_configured_keys(tmp_path):
     artifact_root = tmp_path / "private-artifacts"
     artifact_root.mkdir()
     document = artifact_root / "report.md"
-    document.write_text("private value: " + key, encoding="utf-8")
+    document.write_text("private value: " + key + " " + TOKEN, encoding="utf-8")
     manager.jobs[JOB_ID] = {
         "job_id": JOB_ID, "session_id": "b" * 32, "idea": "secret redaction", "status": "completed",
-        "result": {"report": {"markdown": "model echoed " + key}},
-        "events": [{"seq": 1, "timestamp": "t1", "kind": "trace", "message": key,
-                    "stage": "report", "data": {"value": key}}],
+        "result": {"report": {"markdown": "model echoed " + key + " " + TOKEN}},
+        "events": [{"seq": 1, "timestamp": "t1", "kind": "trace", "message": key + " " + TOKEN,
+                    "stage": "report", "data": {"value": key, "token": TOKEN}}],
         "artifacts": [{"artifact_id": "safe1", "name": "report.md", "kind": "report"}],
         "_artifact_paths": {"safe1": str(document)}, "_artifact_roots": [str(artifact_root)],
     }
@@ -254,7 +267,8 @@ def test_job_events_and_artifact_payloads_redact_configured_keys(tmp_path):
 
     job, events, text = asyncio.run(scenario())
     assert all(response.status_code == 200 for response in (job, events, text))
-    assert all(key not in response.text for response in (job, events, text))
+    assert all(key not in response.text and TOKEN not in response.text
+               for response in (job, events, text))
     assert "[已隐藏]" in job.text and "[已隐藏]" in events.text and "[已隐藏]" in text.text
 
 
@@ -262,6 +276,7 @@ def test_sse_replays_after_sequence_then_emits_terminal_done(tmp_path):
     app, manager, _ = _app_at(tmp_path)
     manager.jobs[JOB_ID] = {
         "job_id": JOB_ID, "session_id": "b" * 32, "idea": "trace", "status": "completed",
+        "delivery_status": "preliminary_notes",
         "events": [
             {"seq": 1, "timestamp": "t1", "kind": "status", "message": "queued", "stage": "", "data": {}},
             {"seq": 2, "timestamp": "t2", "kind": "trace", "message": "", "stage": "main_agent_tool_call",
@@ -276,7 +291,8 @@ def test_sse_replays_after_sequence_then_emits_terminal_done(tmp_path):
     assert '"seq": 2' in response.text
     assert '"stage": "main_agent_tool_call"' in response.text
     assert "id: 1" not in response.text
-    assert f'event: done\ndata: {{"job_id": "{JOB_ID}", "status": "completed"}}' in response.text
+    assert (f'event: done\ndata: {{"job_id": "{JOB_ID}", "status": "completed", '
+            '"delivery_status": "preliminary_notes"}') in response.text
 
 
 def test_service_shutdown_refuses_active_jobs(tmp_path):
@@ -394,3 +410,158 @@ def test_legacy_jobs_are_discoverable_as_stable_read_only_conversations(tmp_path
         reopened.submit_message({"text": "继续讨论", "conversation_id": identifier, "action": "chat"})
     assert error.value.status == 409
     assert not (root / "conversations").exists()
+
+
+@pytest.mark.parametrize("requested_mode, expected_request, expected_actual", [
+    ("auto", "auto", "sequential"),
+    ("parallel", "parallel", "concurrent"),
+    ("sequential", "sequential", "sequential"),
+    ("concurrent", "parallel", "concurrent"),
+])
+def test_execution_mode_request_is_recorded_separately_without_changing_candidate_limits(
+        tmp_path, requested_mode, expected_request, expected_actual):
+    captured = []
+
+    async def runner(job, settings, _progress):
+        captured.append(settings)
+        return PipelineResult(idea=job["idea"], mode="demo", status="completed",
+                              execution_mode=settings.execution_mode, top_k=job["top_k"])
+
+    async def scenario():
+        bench = Workbench(_settings(tmp_path), root=tmp_path / "service" / requested_mode,
+                          config_path=tmp_path / f"{requested_mode}-config.json", research_runner=runner)
+        session = bench.create_session()
+        submitted = bench.submit(session["session_id"], {
+            "idea": "execution mode contract", "top_k": 8, "mode": "demo",
+            "execution_mode": requested_mode,
+        })
+        await bench.tasks[submitted["job_id"]]
+        return submitted, bench.jobs[submitted["job_id"]], bench.public_config()
+
+    submitted, job, config = asyncio.run(scenario())
+    assert submitted["status"] == "pending"
+    assert submitted["delivery_status"] is None
+    assert job["status"] == "completed"
+    assert job["delivery_status"] == "no_result"
+    assert job["requested_execution_mode"] == expected_request
+    assert job["execution_mode"] == expected_actual
+    assert job["result"]["requested_execution_mode"] == expected_request
+    assert job["result"]["execution_mode"] == expected_actual
+    assert job["result"]["brief"]["next_step"]["action"]
+    assert captured[0].source_limit == 20
+    assert captured[0].candidate_limit == 15
+    assert config["default_execution_mode"] == "auto"
+
+
+def test_terminal_result_calls_agent7_and_binds_one_report_artifact(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    report_path = settings.reports_dir / "report.md"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("FULL REPORT BODY", encoding="utf-8")
+    pdf_path = settings.pdf_dir / "paper.pdf"
+    markdown_path = settings.markdown_dir / "paper.md"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b"%PDF-fixture")
+    markdown_path.write_text("evidence", encoding="utf-8")
+    paper = Paper(paper_id="paper-1", title="Actual paper", selection_reason="Relevant")
+    selected = paper.model_copy(deep=True)
+    selected.pdf_path, selected.markdown_path = str(pdf_path), str(markdown_path)
+    evidence = EvidenceReference(paper_id="paper-1", quote="evidence", claim="Supported finding",
+                                 page_number=1)
+    summary = PaperSummary(paper_id="paper-1", summary_scope="partial_fulltext",
+                           findings=["Supported finding"], evidence=[evidence])
+    report = ResearchReport(idea="brief contract", overview="Overview", report_path=str(report_path))
+    run = PipelineResult(idea="brief contract", mode="demo", status="completed", top_k=3,
+                         execution_mode="concurrent", papers=[paper], selected_papers=[selected],
+                         summaries=[summary], report=report)
+    job = {"job_id": JOB_ID, "session_id": "b" * 32, "idea": run.idea, "query": "", "top_k": 3,
+           "mode": "demo", "execution_mode": "concurrent", "requested_execution_mode": "parallel",
+           "status": "running", "delivery_status": None, "result": None, "events": [], "artifacts": []}
+    bench = Workbench(settings, root=tmp_path / "service", config_path=tmp_path / "config.json")
+    calls = []
+
+    def fake_build_research_brief(*, papers, summaries, report):
+        calls.append({"papers": papers, "summaries": summaries, "report": report})
+        brief = ResearchBrief(
+            findings=[Finding(statement="Supported finding", evidence=[evidence.model_copy(deep=True)])],
+            key_papers=[KeyPaper(paper_id="paper-1", evidence_level="partial_fulltext")],
+            next_step=NextStep(action="Read the canonical report"),
+            report_artifact_id="unregistered-fake-report-id",
+        )
+        return brief, "no_result"
+
+    monkeypatch.setattr("paper_agent.agents.research_agent.build_research_brief", fake_build_research_brief)
+    finalized = bench._finalize_terminal_result(job, run, settings, "completed")
+    job["status"] = "completed"
+
+    assert len(calls) == 1
+    assert [paper.paper_id for paper in calls[0]["papers"]] == ["paper-1"]
+    assert calls[0]["summaries"] == [summary]
+    assert calls[0]["report"] is report
+    assert finalized.delivery_status == job["delivery_status"] == "no_result"
+    assert finalized.status == "completed"
+    assert finalized.requested_execution_mode == "parallel"
+    report_id = finalized.report.report_artifact_id
+    assert report_id and report_id != "unregistered-fake-report-id"
+    assert finalized.brief.report_artifact_id == report_id
+    assert any(item["artifact_id"] == report_id and item["kind"] == "report"
+               for item in job["artifacts"])
+    assert finalized.selected_papers[0].pdf_artifact_id
+    assert finalized.brief.findings[0].evidence[0].pdf_artifact_id == finalized.selected_papers[0].pdf_artifact_id
+    public = bench.public_job(job)
+    assert public["delivery_status"] == "no_result"
+    assert public["result"]["brief"]["report_artifact_id"] == report_id
+    assistant = [message for message in public["conversation"]["messages"]
+                 if message["role"] == "assistant"]
+    assert "FULL REPORT BODY" not in assistant[0]["content"]
+    assert "报告入口" in assistant[0]["content"]
+
+
+def test_public_error_is_layered_from_detailed_execution_record(tmp_path):
+    async def runner(_job, _settings, _progress):
+        raise LLMOutputError("invalid_model_output: detailed parser fixture")
+
+    async def scenario():
+        bench = Workbench(_settings(tmp_path), root=tmp_path / "service",
+                          config_path=tmp_path / "config.json", research_runner=runner)
+        session = bench.create_session()
+        submitted = bench.submit(session["session_id"], {
+            "idea": "layered error contract", "mode": "demo", "execution_mode": "auto",
+        })
+        await bench.tasks[submitted["job_id"]]
+        return bench.jobs[submitted["job_id"]]
+
+    job = asyncio.run(scenario())
+    assert job["status"] == "failed"
+    assert job["delivery_status"] == "no_result"
+    assert job["result"]["brief"] is not None
+    assert "invalid_model_output" not in job["error"]
+    assert any("invalid_model_output" in event["message"] for event in job["events"])
+    terminal = job["events"][-1]
+    assert terminal["data"] == {"status": "failed", "delivery_status": "no_result"}
+
+
+def test_trace_sync_is_idempotent_and_persists_replay_cursor(tmp_path):
+    async def scenario():
+        settings = _settings(tmp_path)
+        bench = Workbench(settings, root=tmp_path / "service", config_path=tmp_path / "config.json")
+        job = {"job_id": JOB_ID, "session_id": "b" * 32, "idea": "trace replay", "query": "",
+               "top_k": 3, "mode": "demo", "execution_mode": "sequential", "status": "running",
+               "created_at": "", "updated_at": "", "run_id": "run1", "result": None,
+               "events": [], "error": None, "artifacts": []}
+        bench.jobs[JOB_ID] = job
+        directory = settings.output_dir / "run1"
+        directory.mkdir(parents=True)
+        (directory / "trace.jsonl").write_text(
+            json.dumps({"stage": "selector", "event": "finish"}) + "\n", encoding="utf-8")
+        await bench._sync_run(job, settings)
+        await bench._sync_run(job, settings)
+        persisted = json.loads((bench.root / "jobs" / f"{JOB_ID}.json").read_text(encoding="utf-8"))
+        return job, persisted
+
+    job, persisted = asyncio.run(scenario())
+    assert len(job["events"]) == 1
+    assert job["_trace_lines"] == persisted["_trace_lines"] == 1
+    assert len(persisted["events"]) == 1
+    assert persisted["events"][0]["seq"] == 1

@@ -20,13 +20,19 @@ from paper_agent.models import Paper
 
 
 class FakeLLM:
-    def __init__(self, response=None, error=None):
+    def __init__(self, response=None, error=None, outcomes=None):
         self.response = response
         self.error = error
+        self.outcomes = list(outcomes) if outcomes is not None else []
         self.calls = []
 
     async def json(self, system, user):
         self.calls.append((system, json.loads(user)))
+        if self.outcomes:
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return copy.deepcopy(outcome)
         if self.error is not None:
             raise self.error
         return copy.deepcopy(self.response)
@@ -94,6 +100,20 @@ def test_twelve_candidates_llm_can_choose_lower_initial_rank_with_all_metadata()
     assert payload["candidates"][1]["open_access"]["pdf_url_available"] is True
 
 
+@pytest.mark.parametrize("k", [3, 5, 8])
+def test_preferred_top_k_values_use_real_llm_selection(k):
+    papers = candidates()
+    expected = [f"p{i}" for i in range(11, 11 - k, -1)]
+    llm = FakeLLM(response(expected))
+    selected = asyncio.run(select_top_k("Memory", papers, k, llm=llm))
+    assert [paper.paper_id for paper in selected] == expected
+    assert [paper.rank for paper in selected] == list(range(1, k + 1))
+    assert len({paper.paper_id for paper in selected}) == k
+    assert llm.calls[0][1]["requested_count"] == k
+    assert all(paper.selection_reason for paper in selected)
+    assert all(paper.metadata["selection"]["method"] == "llm_reranking" for paper in selected)
+
+
 def test_complete_ranking_also_accepted_and_array_order_uses_rank():
     papers = candidates()
     value = response([p.paper_id for p in reversed(papers)])
@@ -139,9 +159,12 @@ def test_rejects_semantically_or_structurally_invalid_llm_output(problem):
         value["papers"] = []
     llm = FakeLLM(value)
     with pytest.raises(SelectorError) as failure:
-        asyncio.run(select_top_k("Memory", candidates(), 3, llm=llm))
+        asyncio.run(select_top_k(
+            "Memory", candidates(), 3,
+            settings=replace(Settings(), llm_max_retries=0), llm=llm,
+        ))
     assert failure.value.error.code == "selector_invalid_output"
-    assert len(llm.calls) == 1  # Output violations are not retried into success.
+    assert len(llm.calls) == 1  # An explicit zero retry budget disables output repair.
 
 
 def test_reason_alias_supported_but_not_both_spellings():
@@ -157,13 +180,83 @@ def test_reason_alias_supported_but_not_both_spellings():
     (RuntimeError("PRIVATE_PROVIDER_MESSAGE"), "selector_llm_failure"),
     (LLMOutputError("PRIVATE_PROVIDER_MESSAGE"), "selector_invalid_output"),
 ])
-def test_failure_sanitized_and_json_errors_fail_without_second_retry(exception, code, caplog):
+def test_failure_sanitized_when_output_retries_are_disabled(exception, code, caplog):
     llm = FakeLLM(error=exception)
     with pytest.raises(SelectorError) as failure:
-        asyncio.run(select_top_k("Memory", candidates(), 3, llm=llm))
+        asyncio.run(select_top_k(
+            "Memory", candidates(), 3,
+            settings=replace(Settings(), llm_max_retries=0), llm=llm,
+        ))
     assert failure.value.error.code == code
     assert "PRIVATE_PROVIDER_MESSAGE" not in str(failure.value)
     assert "PRIVATE_PROVIDER_MESSAGE" not in caplog.text
+    assert len(llm.calls) == 1
+
+
+def test_invalid_json_recovers_with_bounded_retry_and_sanitized_feedback():
+    llm = FakeLLM(outcomes=[
+        LLMOutputError("PRIVATE_PROVIDER_MESSAGE"),
+        response(["p3", "p2", "p1"]),
+    ])
+    selected = asyncio.run(select_top_k("Memory", candidates(), 3, llm=llm))
+    assert [paper.paper_id for paper in selected] == ["p3", "p2", "p1"]
+    assert len(llm.calls) == 2
+    repair = llm.calls[1][1]["output_repair"]
+    assert repair["previous_error_code"] == "selector_invalid_output"
+    assert "PRIVATE_PROVIDER_MESSAGE" not in json.dumps(repair)
+    audit = selected[0].metadata["selection"]
+    assert audit["llm_call_count"] == 2
+    assert audit["output_retry_count"] == 1
+    assert audit["output_retry_limit"] == 2
+    assert audit["attempts"] == [
+        {
+            "attempt": 1, "status": "failed", "code": "selector_invalid_output",
+            "retry_scheduled": True,
+        },
+        {"attempt": 2, "status": "succeeded", "code": None, "retry_scheduled": False},
+    ]
+    assert audit["degraded"] is False
+
+
+def test_retry_feedback_does_not_exceed_selector_input_budget():
+    papers = candidates(3)
+    _, initial_audit = build_selection_payload("Memory", papers, 3, Settings())
+    settings = replace(Settings(), llm_input_token_budget=initial_audit["input_units"])
+    llm = FakeLLM(outcomes=[
+        LLMOutputError("invalid"), response(["p2", "p1", "p0"]),
+    ])
+    selected = asyncio.run(select_top_k("Memory", papers, 3, settings=settings, llm=llm))
+    assert len(selected) == 3
+    assert "output_repair" not in llm.calls[1][1]
+
+
+def test_semantic_violation_recovers_without_relaxing_validation():
+    invalid = response(["p1", "p1", "p3"])
+    llm = FakeLLM(outcomes=[invalid, response(["p4", "p3", "p2"])])
+    selected = asyncio.run(select_top_k("Memory", candidates(), 3, llm=llm))
+    assert [paper.paper_id for paper in selected] == ["p4", "p3", "p2"]
+    assert len(llm.calls) == 2
+    assert llm.calls[1][1]["output_repair"]["previous_error_code"] == "selector_invalid_output"
+
+
+def test_output_retries_exhausted_raise_without_pretending_success(caplog):
+    llm = FakeLLM(error=LLMOutputError("PRIVATE_PROVIDER_MESSAGE"))
+    with pytest.raises(SelectorError) as failure:
+        asyncio.run(select_top_k(
+            "Memory", candidates(), 3,
+            settings=replace(Settings(), llm_max_retries=2), llm=llm,
+        ))
+    assert failure.value.error.code == "selector_invalid_output"
+    assert len(llm.calls) == 3
+    assert "PRIVATE_PROVIDER_MESSAGE" not in str(failure.value)
+    assert "PRIVATE_PROVIDER_MESSAGE" not in caplog.text
+
+
+def test_generic_model_failure_is_not_retried_again_outside_chat_client():
+    llm = FakeLLM(error=RuntimeError("PRIVATE_PROVIDER_MESSAGE"))
+    with pytest.raises(SelectorError) as failure:
+        asyncio.run(select_top_k("Memory", candidates(), 3, llm=llm))
+    assert failure.value.error.code == "selector_llm_failure"
     assert len(llm.calls) == 1
 
 
@@ -177,10 +270,12 @@ def test_explicit_initial_ranking_fallback_is_marked_and_does_not_claim_model_sc
     papers = list(reversed(candidates()))
     original = copy.deepcopy([p.model_dump() for p in papers])
     settings = replace(Settings(), selector_fallback="initial_ranking")
+    llm = FakeLLM(response(["invented"]))
     selected = asyncio.run(select_top_k(
-        "Memory", papers, 3, settings=settings, llm=FakeLLM(response(["invented"])),
+        "Memory", papers, 3, settings=settings, llm=llm,
     ))
     assert [p.paper_id for p in selected] == ["p0", "p1", "p2"]
+    assert len(llm.calls) == 3
     for paper in selected:
         assert paper.final_score is None
         assert "降级" in paper.selection_reason
@@ -189,6 +284,10 @@ def test_explicit_initial_ranking_fallback_is_marked_and_does_not_claim_model_sc
         assert audit["degraded"] is True
         assert audit["llm_success"] is False
         assert audit["method"] == "initial_ranking_fallback"
+        assert audit["failure_code"] == "selector_invalid_output"
+        assert audit["llm_call_count"] == 3
+        assert audit["output_retry_count"] == 2
+        assert len(audit["attempts"]) == 3
         assert all(score is None for score in audit["llm_scores"].values())
     assert [p.model_dump() for p in papers] == original
     selected[0].metadata["selection"]["final_order"].clear()
@@ -253,10 +352,12 @@ def test_empty_candidates_no_model_call_and_invalid_inputs_are_not_hidden_by_fal
         ))
 
 
-def test_fewer_papers_than_k_is_valid_but_uses_exact_available_count():
+@pytest.mark.parametrize("k", [3, 5, 8])
+def test_fewer_papers_than_k_uses_real_available_count_without_duplicates(k):
     llm = FakeLLM(response(["p0", "p1"]))
-    selected = asyncio.run(select_top_k("Memory", candidates(2), 5, llm=llm))
-    assert len(selected) == 2
+    selected = asyncio.run(select_top_k("Memory", candidates(2), k, llm=llm))
+    assert [paper.paper_id for paper in selected] == ["p0", "p1"]
+    assert len({paper.paper_id for paper in selected}) == 2
     assert llm.calls[0][1]["requested_count"] == 2
 
 

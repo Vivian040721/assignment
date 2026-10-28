@@ -174,7 +174,7 @@ class ChatClient:
                 return await self._request(self._client, payload)
             async with httpx.AsyncClient(
                 timeout=self.settings.llm_timeout, proxy=self.settings.http_proxy or None,
-                follow_redirects=False,
+                trust_env=False, follow_redirects=False,
             ) as client:
                 return await self._request(client, payload)
 

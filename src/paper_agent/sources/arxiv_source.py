@@ -113,7 +113,7 @@ def _identifier(raw: str) -> tuple[str, str | None]:
     return match.group("base"), match.group("version")
 
 
-def _pdf_link(entry: ET.Element, base_id: str) -> str | None:
+def _pdf_link(entry: ET.Element, base_id: str, version: str | None) -> str | None:
     for link in entry.findall("a:link", NS):
         if link.get("title", "").lower() != "pdf" and link.get("type") != "application/pdf":
             continue
@@ -129,7 +129,11 @@ def _pdf_link(entry: ET.Element, base_id: str) -> str | None:
         if not path.startswith("/pdf/"):
             continue
         match = _ID.fullmatch(path.removeprefix("/pdf/").removesuffix(".pdf"))
-        if match and match.group("base") == base_id:
+        if (
+            match
+            and match.group("base") == base_id
+            and match.group("version") == version
+        ):
             return "https://arxiv.org" + path
     return None
 
@@ -177,7 +181,7 @@ def _parse_page(xml: str | bytes) -> tuple[list[Paper], int]:
         doi = re.sub(
             r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", _text(entry, "x:doi"), flags=re.I
         ).strip().lower() or None
-        pdf_url = _pdf_link(entry, base_id)
+        pdf_url = _pdf_link(entry, base_id, version)
         paper_url = "https://arxiv.org/abs/" + base_id + (version or "")
         record = {
             "source": "arxiv", "id": base_id + (version or ""),
@@ -323,6 +327,7 @@ async def search_arxiv(
         async with httpx.AsyncClient(
             timeout=settings.http_timeout,
             proxy=settings.http_proxy or None,
+            trust_env=False,
             follow_redirects=False,
             limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
         ) as owned_client:

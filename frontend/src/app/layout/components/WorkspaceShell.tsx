@@ -30,6 +30,22 @@ export function WorkspaceShell() {
 
   const rail = compact || layout.sidebarCollapsed;
   const sidebarWidth = rail ? 58 : layout.sidebarWidth;
+  const focusReading = layout.focusReading;
+  useEffect(() => {
+    if (!focusReading) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      event.preventDefault();
+      layoutStore.setFocusReading(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [focusReading]);
+  useEffect(() => {
+    if (!layout.dockOpen && layout.focusReading) layoutStore.setFocusReading(false);
+  }, [layout.dockOpen, layout.focusReading]);
   const dockWidthLimit = Math.max(310, Math.min(520, viewport.width - sidebarWidth - 470));
   const effectiveDockWidth = stacked || !layout.dockOpen
     ? layout.dockWidth
@@ -81,11 +97,11 @@ export function WorkspaceShell() {
     });
   };
 
-  return <div className={`workspace ${stacked ? 'workspace-stacked' : ''} ${compact ? 'workspace-compact' : ''} ${rail ? 'workspace-sidebar-rail' : ''} ${layout.dockOpen ? '' : 'workspace-no-dock'}`} style={style}>
+  return <div className={`workspace ${stacked ? 'workspace-stacked' : ''} ${compact ? 'workspace-compact' : ''} ${rail ? 'workspace-sidebar-rail' : ''} ${layout.dockOpen ? '' : 'workspace-no-dock'} ${focusReading ? 'workspace-focus-reading' : ''}`} style={style}>
     <Sidebar compact={compact}/>
     <ResizeHandle className={`sidebar-resize ${rail ? 'is-disabled' : ''}`} disabled={rail} orientation="vertical" value={sidebarWidth} label="调整会话侧栏宽度" onPointerDown={resizeSidebar} onStep={step => layoutStore.setSidebarWidth(layout.sidebarWidth + step)}/>
     <Conversation/>
-    <ResizeHandle className={`dock-resize ${layout.dockOpen ? '' : 'is-disabled'}`} disabled={!layout.dockOpen} orientation={stacked ? 'horizontal' : 'vertical'} value={stacked ? layout.dockHeight : layout.dockWidth} label={stacked ? '调整资料 Dock 高度' : '调整资料 Dock 宽度'} onPointerDown={resizeDock} onStep={step => stacked ? layoutStore.setDockHeight(layout.dockHeight + step) : layoutStore.setDockWidth(layout.dockWidth - step)}/>
+    <ResizeHandle className={`dock-resize ${layout.dockOpen && !focusReading ? '' : 'is-disabled'}`} disabled={!layout.dockOpen || focusReading} orientation={stacked ? 'horizontal' : 'vertical'} value={stacked ? layout.dockHeight : layout.dockWidth} label={stacked ? '调整资料 Dock 高度' : '调整资料 Dock 宽度'} onPointerDown={resizeDock} onStep={step => stacked ? layoutStore.setDockHeight(layout.dockHeight + step) : layoutStore.setDockWidth(layout.dockWidth - step)}/>
     <RightDock hidden={!layout.dockOpen}/>
     {state.error && <div className="global-feedback feedback-error" role="alert" aria-live="assertive">
       <span>{state.error}</span><button type="button" aria-label="关闭错误提示" onClick={() => workspaceStore.clearError()}><X size={15}/></button>

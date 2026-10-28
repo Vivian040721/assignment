@@ -2,6 +2,7 @@ const statuses: Record<string, string> = {
   queued: '排队中',
   running: '进行中',
   completed: '已完成',
+  partial_success: '部分完成',
   partial: '部分完成',
   failed: '失败',
   cancelled: '已取消',
@@ -41,7 +42,7 @@ const stages: Record<string, string> = {
 
 const tools: Record<string, string> = {
   search_papers: '检索论文',
-  select_top_k_papers: '筛选 Top-k',
+  select_top_k_papers: '筛选精选论文',
   prepare_fulltexts: '准备全文',
   summarize_selected_papers: '总结入选论文',
   generate_research_report: '生成研究报告',
@@ -57,6 +58,7 @@ const kinds: Record<string, string> = {
   research: '研究',
   tool: '工具',
   message: '消息',
+  execution_record: '执行记录',
 };
 
 const scopes: Record<string, string> = {
@@ -67,6 +69,23 @@ const scopes: Record<string, string> = {
   abstract: '仅摘要',
   failed: '总结失败',
   demo_fixture: '演示样例',
+};
+
+const summaryStatuses: Record<string, string> = {
+  missing: '总结缺失',
+  failed: '总结失败',
+  usable_partial: '可用部分总结',
+  complete: '总结完整',
+  unknown: '总结状态未知',
+};
+
+const targetStatuses: Record<string, string> = {
+  title_direct: '标题直接线索',
+  title_related: '标题相关/变体',
+  abstract_mention: '仅摘要提及',
+  unresolved: '身份未解决',
+  title_match: '标题词面匹配（旧记录）',
+  not_retrieved: '未检索到（旧记录）',
 };
 
 const paperStatuses: Record<string, string> = {
@@ -114,6 +133,7 @@ const errors: Record<string, string> = {
   no_extractable_text: 'PDF 没有可用的可提取文本层。',
   invalid_model_output: '模型输出未通过字段、引用或证据校验。',
   partial_summary: '部分源文本分块未成功总结，范围已降级。',
+  partial_synthesis: '论文级综合使用了有界或删减后的输入，当前为受限综合。',
   partial_report: '可用全文总结不足，当前为部分报告。',
   llm_budget: '模型输入或请求预算已用尽。',
   llm_configuration: '模型配置不可用。',
@@ -158,6 +178,16 @@ export function kindLabel(kind?: string): string {
 export function summaryScopeLabel(scope?: string): string {
   if (!scope) return '范围未标注';
   return scopes[scope] ?? `未知范围（${scope}）`;
+}
+
+export function summaryStatusLabel(status?: string): string {
+  if (!status) return '总结状态未知';
+  return summaryStatuses[status] ?? `未知总结状态（${status}）`;
+}
+
+export function targetStatusLabel(status?: string): string {
+  if (!status) return '身份未解决';
+  return targetStatuses[status] ?? `未知匹配层级（${status}）`;
 }
 
 export function paperStatusLabel(status?: string): string {
@@ -205,8 +235,9 @@ const errorHints: Record<string, string> = {
   no_extractable_text: 'PDF 没有可提取文本层，不能作为全文证据。',
   invalid_model_output: '展开错误详情查看字段或证据定位；已成功校验的内容会保留。',
   partial_summary: '只有成功读取并校验的分块进入总结，未读部分不会计入。',
+  partial_synthesis: '有界综合不会显示为完整论文分析；完整分块笔记和全部验证证据保留在任务产物中。',
   partial_report: '报告只使用实际可用的单篇总结，缺失论文不会被补写。',
-  llm_budget: '检查模型输入或请求预算；缩小 Top-k 后重新发起也是一种选择。',
+  llm_budget: '检查模型输入或请求预算；减少精选论文数量后重新发起也是一种选择。',
   llm_failed: '检查模型连接与配置；本次不会自动重复计费请求。',
   selector_fallback: '筛选已按配置降级，请查看筛选审计与原因。',
   selector_invalid_output: '筛选输出未通过结构校验；可查看活动记录中的筛选错误。',

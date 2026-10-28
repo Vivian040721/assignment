@@ -96,7 +96,7 @@ export function SettingsPanel() {
         <label className="field"><span>HTTP Proxy</span><input value={proxy} onChange={event => setProxy(event.target.value)} placeholder="留空表示不使用代理" autoComplete="url"/></label>
         <label className="toggle-field"><span><strong>思考模式</strong><small>按服务端模型配置启用。</small></span><input type="checkbox" checked={thinking} onChange={event => setThinking(event.target.checked)}/></label>
         <div className="settings-grid">
-          <label className="field"><span>默认 Top-k</span><input type="number" min={1} max={15} value={topK} onChange={event => setTopK(Number(event.target.value))}/></label>
+          <label className="field"><span>默认精选论文</span><select aria-label="默认精选论文数量" value={topK} onChange={event => setTopK(Number(event.target.value))}>{![3, 5, 8].includes(topK) && <option value={topK}>其他 {topK} 篇</option>}<option value={3}>3 篇</option><option value={5}>5 篇</option><option value={8}>8 篇</option></select></label>
           <label className="field"><span>并发数</span><input type="number" min={1} max={8} value={concurrency} onChange={event => setConcurrency(Number(event.target.value))}/></label>
           <label className="field"><span>模型超时（秒）</span><input type="number" min={5} max={600} value={llmTimeout} onChange={event => setLlmTimeout(Number(event.target.value))}/></label>
           <label className="field"><span>HTTP 超时（秒）</span><input type="number" min={5} max={300} value={httpTimeout} onChange={event => setHttpTimeout(Number(event.target.value))}/></label>
