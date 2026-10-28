@@ -9,6 +9,15 @@ export function eventMessage(event: EventItem): string {
   return typeof value === 'string' ? value : '';
 }
 
+const internalDiagnosticPattern = /invalid_model_output|chunk[_\s-]*valid|分块校验|range[_\s-]*degrad|范围降级/i;
+
+/** Progress stays readable; original diagnostics remain available in the execution log. */
+export function publicEventMessage(event: EventItem): string {
+  if (event.kind === 'error' || event.stage === 'error') return '一个执行步骤未完成，请查看执行记录。';
+  const message = eventMessage(event);
+  return internalDiagnosticPattern.test(message) ? '模型输出正在按服务端策略校验或恢复。' : message;
+}
+
 export function groupEvents(events: EventItem[]) {
   const groups = new Map<string, EventItem[]>();
   for (const event of events) {

@@ -45,6 +45,7 @@ const api: DesktopAPI = {
     };
   },
   readArtifact: (jobId, artifactId) => ipcRenderer.invoke('artifacts:read', jobId, artifactId),
+  readPdfArtifact: (jobId, artifactId) => ipcRenderer.invoke('artifacts:read-pdf', jobId, artifactId),
   openArtifact: (jobId, artifactId) => ipcRenderer.invoke('artifacts:open', jobId, artifactId),
   exportArtifact: (jobId, artifactId) => ipcRenderer.invoke('artifacts:export', jobId, artifactId),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),

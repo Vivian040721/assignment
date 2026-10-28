@@ -1,6 +1,7 @@
 """Research tasks reject invented evidence and expose incomplete reading."""
 
 import asyncio
+import hashlib
 import json
 from functools import wraps
 from pathlib import Path
@@ -10,12 +11,21 @@ import pytest
 from paper_agent.agents.research_agent import (
     REPORT_SYSTEM,
     SUMMARY_SYSTEM,
+    build_research_brief,
     generate_report,
     summarize_paper,
 )
 from paper_agent.config import Settings
 from paper_agent.llm_client import LLMBudgetError
-from paper_agent.models import ErrorInfo, PageMapping, Paper, PaperSummary, ResearchReport
+from paper_agent.models import (
+    ErrorInfo,
+    EvidenceReference,
+    PageMapping,
+    Paper,
+    PaperReference,
+    PaperSummary,
+    ResearchReport,
+)
 
 
 def test_model_prompts_require_chinese_prose_without_translating_citations():
@@ -53,26 +63,35 @@ def settings_at(tmp_path, **kwargs):
 
 def content_for(request):
     if request["task"] == "merge_paper_summary":
-        notes = request["chunk_summaries"]
+        facts = request["facts"]
         response = {
             "overview": "本文根据提供的原文讨论方法、实验及其局限。",
             "deep_analysis": "## 方法与证据\n\n仅综合提供的分块笔记。\n\n"
                              "## 系统推断\n\n解释仍需验证。\n\n"
                              "## 未经验证的研究设想\n\n尚未开展独立实验。",
-            "research_question": notes[0]["research_question"],
-            "core_idea": notes[0]["core_idea"],
+            "research_question": next(
+                (fact["text"] for fact in facts if fact["theme"] == "question"),
+                "How can the described method work?",
+            ),
+            "core_idea": next(
+                (fact["text"] for fact in facts if fact["theme"] == "mechanism"),
+                "Use the supplied evidence.",
+            ),
             "relevance": "This supplied evidence is relevant to the idea.",
             "evidence": [{"evidence_id": item["evidence_id"]}
                          for item in request["verified_evidence"]],
         }
-        for field in ("methods", "experiments", "findings", "limitations", "author_claims",
-                      "system_inferences", "speculative_ideas"):
-            response[field] = [value for note in notes for value in note[field]]
+        for field, theme in (
+            ("methods", "method"), ("experiments", "experiment"),
+            ("findings", "finding"), ("limitations", "limitation"),
+            ("author_claims", "author_claim"), ("system_inferences", "system_inference"),
+            ("speculative_ideas", "research_idea"),
+        ):
+            response[field] = [fact["text"] for fact in facts if fact["theme"] == theme]
         return response
     segment = next(segment for segment in request["segments"] if segment["text"].strip())
     quote = segment["text"].strip()[:80]
-    evidence = {"paper_id": request["paper"]["paper_id"], "page_number": segment["page_number"],
-                "section": segment["section"], "quote": quote, "claim": "A source-bounded finding.",
+    evidence = {"quote": quote, "claim": "A source-bounded finding.",
                 "evidence_type": "author_claim", "source_segment_id": segment["segment_id"]}
     return {"research_question": "How can the described method work?", "core_idea": "Use the supplied evidence.",
             "methods": ["A method in the supplied text."], "experiments": ["Experiment for " + quote],
@@ -120,13 +139,22 @@ def full_paper(tmp_path, *, paper_id="arxiv:1234.5678", texts=None, quality=True
 @run_async
 async def test_fulltext_quotes_pages_and_json_artifacts(tmp_path):
     model = RecordingLLM()
-    summary = await summarize_paper("agent memory", full_paper(tmp_path), settings=settings_at(tmp_path), llm=model)
+    paper = full_paper(tmp_path)
+    paper.pdf_artifact_id = "pdf-artifact"
+    paper.markdown_artifact_id = "markdown-artifact"
+    summary = await summarize_paper("agent memory", paper, settings=settings_at(tmp_path), llm=model)
     assert summary.summary_scope == "fulltext"
     assert summary.evidence[0].page_number == 1
+    assert summary.evidence[0].pdf_artifact_id == "pdf-artifact"
+    assert summary.evidence[0].markdown_artifact_id == "markdown-artifact"
+    assert summary.summary_artifact_id == hashlib.sha256(
+        f"summary:{paper.paper_id}".encode("utf-8")
+    ).hexdigest()[:20]
     assert not summary.errors
     assert Path(summary.summary_path).parent == (tmp_path / "data" / "summaries")
     persisted = json.loads(Path(summary.summary_path).with_suffix(".json").read_text(encoding="utf-8"))
     assert persisted["summary_scope"] == "fulltext"
+    assert persisted["summary_artifact_id"] == summary.summary_artifact_id
     assert persisted["overview"] and persisted["deep_analysis"]
     assert "系统推断" in summary.markdown and "未经验证的研究设想" in summary.markdown
     assert [request["task"] for _, request in model.requests] == [
@@ -301,7 +329,11 @@ async def test_max_chunks_is_explicit_partial_and_includes_end(tmp_path):
 
 @run_async
 async def test_merge_input_budget_does_not_drop_verified_notes(tmp_path):
-    paper = full_paper(tmp_path, texts=["Evidence for every paragraph. " * 150])
+    texts = [
+        "\n\n".join(f"Evidence {page}-{line} for every paragraph." for line in range(1, 61))
+        for page in range(1, 5)
+    ]
+    paper = full_paper(tmp_path, texts=texts)
     model = RecordingLLM()
     settings = settings_at(tmp_path, chunk_chars=1000, max_chunks=20, llm_input_token_budget=3500)
     summary = await summarize_paper("memory", paper, settings=settings, llm=model)
@@ -359,7 +391,10 @@ async def test_report_uses_only_actual_ids_and_persists(tmp_path):
     report = await generate_report("memory", usable_summaries(), settings=settings_at(tmp_path), llm=RecordingLLM())
     assert not report.errors
     assert {reference.paper_id for reference in report.references} == {"p1", "p2", "p3"}
+    assert report.report_artifact_id == hashlib.sha256(b"report:report").hexdigest()[:20]
     assert Path(report.report_path).with_suffix(".json").exists()
+    persisted = json.loads(Path(report.report_path).with_suffix(".json").read_text(encoding="utf-8"))
+    assert persisted["report_artifact_id"] == report.report_artifact_id
     assert "待验证的研究方向" in report.markdown
 
 
@@ -494,3 +529,172 @@ async def test_shared_demo_llm_contract_remains_explicitly_synthetic(tmp_path):
     assert report.overview.startswith("DEMO ONLY")
     assert {error.code for error in report.errors} == {"partial_report"}
     assert llm.usage.requests == 0
+
+
+def brief_inputs(count=3, scope="fulltext"):
+    papers = [
+        Paper(
+            paper_id=f"p{index}", title=f"Paper {index}",
+            selection_reason=f"Selected for question {index}",
+            pdf_artifact_id=f"pdf-{index}", markdown_artifact_id=f"markdown-{index}",
+        )
+        for index in range(1, count + 1)
+    ]
+    summaries = [
+        PaperSummary(
+            paper_id=f"p{index}", title=f"Paper {index}", summary_scope=scope,
+            overview="A complete paper-level overview.",
+            deep_analysis="A complete paper-level analysis.",
+            research_question="A question", core_idea="An idea",
+            findings=[f"Finding {index}-1", f"Finding {index}-2"],
+            evidence=[
+                EvidenceReference(
+                    paper_id=f"p{index}", quote=f"Source quote {index}-1",
+                    claim=f"Finding {index}-1", page_number=index,
+                    pdf_artifact_id=f"pdf-{index}",
+                    markdown_artifact_id=f"markdown-{index}",
+                ),
+                EvidenceReference(
+                    paper_id=f"p{index}", quote=f"Source quote {index}-2",
+                    claim=f"Finding {index}-2", page_number=index + 1,
+                ),
+            ],
+        )
+        for index in range(1, count + 1)
+    ]
+    report = ResearchReport(
+        idea="memory", overview="A source-bounded synthesis.",
+        references=[PaperReference(paper_id=paper.paper_id, title=paper.title) for paper in papers],
+        report_artifact_id=hashlib.sha256(b"report:report").hexdigest()[:20],
+    )
+    return papers, summaries, report
+
+
+def test_brief_builds_traceable_result_without_mutating_inputs():
+    papers, summaries, report = brief_inputs()
+    original = (
+        [paper.model_dump() for paper in papers],
+        [summary.model_dump() for summary in summaries],
+        report.model_dump(),
+    )
+    brief, status = build_research_brief(
+        papers=papers, summaries=summaries, report=report,
+    )
+    assert status == "result"
+    assert len(brief.findings) == 3
+    assert [finding.statement for finding in brief.findings] == [
+        "Finding 1-1", "Finding 2-1", "Finding 3-1",
+    ]
+    for finding, summary in zip(brief.findings, summaries):
+        assert finding.evidence[0].paper_id == summary.paper_id
+        assert finding.evidence[0].quote == summary.evidence[0].quote
+        assert finding.evidence[0] is not summary.evidence[0]
+    assert [paper.evidence_level for paper in brief.key_papers] == ["fulltext"] * 3
+    assert brief.key_papers[0].selection_reason == "Selected for question 1"
+    assert brief.next_step.action
+    assert brief.report_artifact_id == report.report_artifact_id
+    assert original == (
+        [paper.model_dump() for paper in papers],
+        [summary.model_dump() for summary in summaries],
+        report.model_dump(),
+    )
+
+
+@pytest.mark.parametrize("scope", ["abstract_only", "partial_fulltext"])
+def test_brief_preserves_reading_scope_as_preliminary(scope):
+    papers, summaries, report = brief_inputs(scope=scope)
+    brief, status = build_research_brief(
+        papers=papers, summaries=summaries, report=report,
+    )
+    assert status == "preliminary_notes"
+    assert len(brief.findings) == 3
+    assert {paper.evidence_level for paper in brief.key_papers} == {scope}
+    assert any(scope == "abstract_only" and "摘要级" in item.description or
+               scope == "partial_fulltext" and "部分全文" in item.description
+               for item in brief.limitations)
+    assert "完整阅读" in brief.next_step.action
+
+
+def test_brief_retains_reliable_partial_material_and_failed_paper_gap():
+    papers, summaries, _ = brief_inputs()
+    summaries[2] = PaperSummary(
+        paper_id="p3", title="Paper 3", summary_scope="failed",
+        errors=[ErrorInfo(code="llm_failed", stage="summarize", message="模型分析失败。")],
+    )
+    brief, status = build_research_brief(
+        papers=papers, summaries=summaries, report=None,
+    )
+    assert status == "preliminary_notes"
+    assert [paper.paper_id for paper in brief.key_papers] == ["p1", "p2"]
+    assert len(brief.findings) == 3
+    assert {finding.evidence[0].paper_id for finding in brief.findings} == {"p1", "p2"}
+    assert any(item.paper_ids == ["p3"] for item in brief.limitations)
+    assert any("完整综合报告" in item.description for item in brief.limitations)
+
+
+def test_brief_full_notes_without_report_are_not_promoted():
+    papers, summaries, _ = brief_inputs()
+    brief, status = build_research_brief(
+        papers=papers, summaries=summaries, report=None,
+    )
+    assert status == "preliminary_notes"
+    assert brief.report_artifact_id is None
+    assert len(brief.findings) == 3
+
+
+def test_brief_omits_unsupported_findings_and_never_pads_to_three():
+    papers, summaries, report = brief_inputs(count=4)
+    summaries[0].findings = ["Unsupported statement"]
+    summaries[0].evidence = []
+    brief, status = build_research_brief(
+        papers=papers, summaries=summaries, report=report,
+    )
+    assert status == "preliminary_notes"
+    assert [finding.statement for finding in brief.findings] == [
+        "Finding 2-1", "Finding 3-1", "Finding 4-1",
+    ]
+    assert all(finding.statement != "Unsupported statement" for finding in brief.findings)
+    assert all(finding.evidence for finding in brief.findings)
+    assert any("缺少可关联" in item.description for item in brief.limitations)
+
+
+def test_brief_matches_numbers_to_the_supporting_quote_not_first_evidence():
+    papers, summaries, report = brief_inputs(count=3)
+    summaries[0].findings = [
+        "扰动导致 8.8% 退化：ε=0 时 96.88%，ε=0.2 时 88.12%（f35、f63、e6）",
+        "没有对应引文的额外断言",
+    ]
+    summaries[0].evidence = [
+        EvidenceReference(
+            paper_id="p1", claim="Background framing only.",
+            quote="A general statement without the reported measurements.", page_number=1,
+        ),
+        EvidenceReference(
+            paper_id="p1", claim="扰动使通过率从 96.88% 降至 88.12%。",
+            quote="Perturbations cause 8.8% degradation: from 96.88% to 88.12%.",
+            page_number=9, pdf_artifact_id="pdf-1",
+        ),
+    ]
+    brief, _ = build_research_brief(
+        papers=papers, summaries=summaries, report=report,
+    )
+    finding = next(item for item in brief.findings if "8.8%" in item.statement)
+    assert "96.88%" in finding.statement and "88.12%" in finding.statement
+    assert "f35" not in finding.statement and "e6" not in finding.statement
+    assert finding.evidence[0].page_number == 9
+    assert "96.88%" in finding.evidence[0].quote
+    assert all("没有对应引文" not in item.statement for item in brief.findings)
+    assert any("未找到可核验的引文支持" in item.description for item in brief.limitations)
+
+
+def test_brief_no_result_has_reason_and_actionable_next_step():
+    paper = Paper(paper_id="p1", title="Unavailable")
+    summary = PaperSummary(paper_id="p1", title="Unavailable", summary_scope="failed")
+    brief, status = build_research_brief(
+        papers=[paper], summaries=[summary], report=None,
+    )
+    assert status == "no_result"
+    assert not brief.findings and not brief.key_papers
+    assert brief.limitations
+    assert brief.next_step.action and brief.next_step.rationale
+    assert brief.report_artifact_id is None

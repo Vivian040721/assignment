@@ -12,6 +12,7 @@ export interface LayoutState {
   dockHeight: number;
   activeGroupId: DockGroupId;
   groups: DockGroup[];
+  focusReading: boolean;
 }
 
 const DEFAULT_GROUPS: DockGroup[] = [{
@@ -29,6 +30,7 @@ function initialState(): LayoutState {
     dockHeight: 286,
     activeGroupId: 'main',
     groups: DEFAULT_GROUPS,
+    focusReading: false,
   };
   if (typeof window === 'undefined') return defaults;
   try {
@@ -91,6 +93,7 @@ function normalizeLayout(input: Record<string, unknown>, defaults: LayoutState, 
     dockHeight: clampNumber(input.dockHeight, 286, 200, 560),
     activeGroupId,
     groups,
+    focusReading: false,
   };
 }
 
@@ -148,7 +151,7 @@ function withGroups(groups: DockGroup[], activeGroupId = state.activeGroupId): v
 const panelTabs: Record<Exclude<PanelKind, 'paper'>, LayoutTab> = {
   papers: { id: 'panel:papers', kind: 'papers', title: '论文' },
   report: { id: 'panel:report', kind: 'report', title: '研究报告' },
-  activity: { id: 'panel:activity', kind: 'activity', title: '活动记录' },
+  activity: { id: 'panel:activity', kind: 'activity', title: '执行记录' },
   metrics: { id: 'panel:metrics', kind: 'metrics', title: '性能数据' },
   settings: { id: 'panel:settings', kind: 'settings', title: '设置' },
 };
@@ -174,6 +177,13 @@ export const layoutStore = {
   },
   openDock(): void {
     if (!state.dockOpen) patch({ dockOpen: true });
+  },
+  setFocusReading(value: boolean): void {
+    if (state.focusReading === value) return;
+    publish({ ...state, focusReading: value, dockOpen: value ? true : state.dockOpen }, false);
+  },
+  toggleFocusReading(): void {
+    this.setFocusReading(!state.focusReading);
   },
   setDockWidth(value: number): void {
     const dockWidth = Math.max(310, Math.min(520, Math.round(value)));

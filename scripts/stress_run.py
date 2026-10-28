@@ -163,6 +163,8 @@ def main() -> int:
         "profile": summary,
         "run_id": result.get("run_id"),
         "status": result.get("status"),
+        "delivery_status": result.get("delivery_status"),
+        "brief": result.get("brief"),
         "source_counts": result.get("source_counts"),
         "selected_count": len(result.get("selected_papers", [])),
         "analysis_count": len(result.get("metrics", {}).get("analysis_paper_ids", [])),
@@ -179,7 +181,7 @@ def main() -> int:
     }
     (output / "stress-summary.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({key: report[key] for key in (
-        "run_id", "status", "source_counts", "selected_count", "analysis_count",
+        "run_id", "status", "delivery_status", "source_counts", "selected_count", "analysis_count",
         "summary_count", "errors", "output_dir")}, ensure_ascii=False, indent=2))
     return 0 if report["status"] in {"completed", "partial", "demo_completed"} else 1
 

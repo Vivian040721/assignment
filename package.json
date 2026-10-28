@@ -1,6 +1,6 @@
 {
   "name": "paper-agent-desktop",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "description": "Paper Agent: Electron research workspace with Python MCP",
   "author": "Assignment Team",
@@ -18,8 +18,9 @@
     "start": "electron .",
     "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p frontend/tsconfig.json --noEmit",
     "test:electron": "node --test tests/electron/*.test.mjs",
-    "test:frontend": "node --test tests/frontend/*.test.mjs",
+    "test:frontend": "node --test tests/frontend/*.test.mjs frontend/src/app/tests/*.test.mjs",
     "test:e2e": "node tests/e2e/desktop.mjs",
+    "test:e2e:mock": "node tests/e2e/mock-desktop.mjs",
     "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-backend.ps1",
     "pack": "npm run build && electron-builder --dir --config electron-builder.config.cjs",
     "dist": "npm run build && electron-builder --config electron-builder.config.cjs",
@@ -34,5 +35,8 @@
     "esbuild": "0.28.2",
     "typescript": "~5.6.3",
     "vite": "^6.0.1"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.4.299"
   }
 }

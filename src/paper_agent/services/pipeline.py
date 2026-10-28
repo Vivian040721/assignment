@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from paper_agent.agents.research_agent import generate_report, summarize_paper
+from paper_agent.agents.research_agent import build_research_brief, generate_report, summarize_paper
 from paper_agent.agents.selector_agent import select_top_k
 from paper_agent.config import Settings
 from paper_agent.llm_client import ChatClient
@@ -25,6 +25,7 @@ from paper_agent.services.downloader import download_pdf
 from paper_agent.services.pdf_converter import convert_pdf
 from paper_agent.services.retrieval import (
     build_bounded_candidate_pool,
+    build_source_queries,
     match_explicit_targets,
     merge_dedupe_rank,
     normalize_explicit_targets,
@@ -205,6 +206,7 @@ class ResearchPipeline:
         ]
         analysis_set = set(analysis_ids)
         summaries = {summary.paper_id: summary for summary in run.summaries}
+        complete_scope = "demo_fixture" if run.mode == "demo" else "fulltext"
         report_ids = (
             [reference.paper_id for reference in run.report.references]
             if run.report is not None else []
@@ -216,7 +218,9 @@ class ResearchPipeline:
                 if isinstance(paper_id, str)
             ]
             complete, partial, summarized = [], [], []
-            fulltext_summaries, partial_summaries = [], []
+            fulltext_summaries = []
+            usable_partial_summaries, failed_summaries, missing_summaries = [], [], []
+            complete_summaries = []
             for paper_id in direct:
                 paper = papers.get(paper_id)
                 if paper is not None and paper_id in analysis_set:
@@ -225,12 +229,19 @@ class ResearchPipeline:
                     elif self._readable(paper):
                         partial.append(paper_id)
                 summary = summaries.get(paper_id)
-                if summary is not None:
+                status = self._summary_status(summary, complete_scope)
+                if status == "complete":
+                    complete_summaries.append(paper_id)
+                elif status == "usable_partial":
+                    usable_partial_summaries.append(paper_id)
+                elif status == "failed":
+                    failed_summaries.append(paper_id)
+                elif status == "missing" and paper_id in analysis_set:
+                    missing_summaries.append(paper_id)
+                if summary is not None and status in {"complete", "usable_partial"}:
                     summarized.append(paper_id)
-                    if summary.summary_scope == "fulltext" and not summary.errors:
-                        fulltext_summaries.append(paper_id)
-                    else:
-                        partial_summaries.append(paper_id)
+                if summary is not None and summary.summary_scope == complete_scope and not summary.errors:
+                    fulltext_summaries.append(paper_id)
             item.update(
                 selected_paper_ids=[paper_id for paper_id in direct if paper_id in selected_set],
                 analysis_paper_ids=[paper_id for paper_id in direct if paper_id in analysis_set],
@@ -238,9 +249,40 @@ class ResearchPipeline:
                 partial_fulltext_paper_ids=partial,
                 summarized_paper_ids=summarized,
                 fulltext_summary_paper_ids=fulltext_summaries,
-                partial_summary_paper_ids=partial_summaries,
+                partial_summary_paper_ids=usable_partial_summaries,
+                complete_summary_paper_ids=complete_summaries,
+                usable_partial_summary_paper_ids=usable_partial_summaries,
+                failed_summary_paper_ids=failed_summaries,
+                missing_summary_paper_ids=missing_summaries,
                 report_paper_ids=[paper_id for paper_id in direct if paper_id in report_set],
+                summary_status_counts={
+                    "complete": len(complete_summaries),
+                    "usable_partial": len(usable_partial_summaries),
+                    "failed": len(failed_summaries),
+                    "missing": len(missing_summaries),
+                },
             )
+            if not direct:
+                related = item.get("related_title_paper_ids") or []
+                abstract = item.get("abstract_mention_paper_ids") or []
+                item["coverage_reason"] = (
+                    "related_title_only" if related
+                    else "abstract_mention_only" if abstract else "no_name_clue"
+                )
+            elif stage != "search" and not any(paper_id in selected_set for paper_id in direct):
+                item["coverage_reason"] = "direct_not_selected_by_llm"
+            elif direct and not item["analysis_paper_ids"] and stage in {"fulltexts", "summarize", "report"}:
+                item["coverage_reason"] = "selected_but_no_readable_fulltext"
+            elif failed_summaries:
+                item["coverage_reason"] = "summary_failed"
+            elif missing_summaries:
+                item["coverage_reason"] = "summary_missing"
+            elif usable_partial_summaries:
+                item["coverage_reason"] = "usable_partial_summary"
+            elif complete_summaries:
+                item["coverage_reason"] = "complete_summary"
+            else:
+                item["coverage_reason"] = "pending"
         coverage.update(
             selected_paper_ids=selected_ids,
             analysis_paper_ids=analysis_ids,
@@ -359,25 +401,55 @@ class ResearchPipeline:
             run.status = "failed"
             return self._finish(run, "search", start, before)
 
+        targets = plan.get("explicit_targets", [])
+        source_query_plans = {
+            source: build_source_queries(source, run.queries, targets)
+            for source in self.searchers
+        }
+        run.metrics["source_query_audit"] = {source: [] for source in self.searchers}
+
         async def source_search(source):
             papers, count = [], 0
             async def on_request(request):
                 nonlocal count
                 count += 1
+            entries = source_query_plans.get(source, [])
             try:
                 async with self._source_gate:
                     if self.settings.mode == "demo":
-                        for planned_query in run.queries:
-                            papers.extend(await self.searchers[source](planned_query, self.settings.source_limit,
-                                                                       settings=self.settings, client=None))
+                        for entry in entries:
+                            audit_item = {**entry, "result_count": 0, "error_code": None}
+                            batch = await self.searchers[source](
+                                entry["executed"], self.settings.source_limit,
+                                settings=self.settings, client=None,
+                            )
+                            audit_item["result_count"] = len(batch)
+                            run.metrics["source_query_audit"][source].append(audit_item)
+                            papers.extend(batch)
                     else:
                         async with httpx.AsyncClient(timeout=self.settings.http_timeout,
                                                  proxy=self.settings.http_proxy or None,
+                                                 trust_env=False,
                                                  follow_redirects=False,
                                                  event_hooks={"request": [on_request]}) as client:
-                            for planned_query in run.queries:
-                                papers.extend(await self.searchers[source](planned_query, self.settings.source_limit,
-                                                                           settings=self.settings, client=client))
+                            for entry in entries:
+                                audit_item = {**entry, "result_count": 0, "error_code": None}
+                                try:
+                                    batch = await self.searchers[source](
+                                        entry["executed"], self.settings.source_limit,
+                                        settings=self.settings, client=client,
+                                    )
+                                except Exception as exc:
+                                    info = getattr(exc, "error_info", None)
+                                    audit_item["error_code"] = (
+                                        info.code if isinstance(info, ErrorInfo)
+                                        else type(exc).__name__
+                                    )
+                                    run.metrics["source_query_audit"][source].append(audit_item)
+                                    raise
+                                audit_item["result_count"] = len(batch)
+                                run.metrics["source_query_audit"][source].append(audit_item)
+                                papers.extend(batch)
                 run.metrics["source_success"][source] = True
                 run.source_counts[source] = len(papers)
                 return papers
@@ -390,6 +462,8 @@ class ResearchPipeline:
                 run.metrics["source_requests"][source] = count
 
         batches = await self._map(source_search, list(self.searchers))
+        plan["source_queries"] = run.metrics.get("source_query_audit", {})
+        run.metrics["query_plan"] = plan
         ranked = merge_dedupe_rank([paper for batch in batches for paper in batch], ranking_query)
         run.metrics["retrieved_count"] = sum(run.source_counts.values())
         run.metrics["unique_count"] = len(ranked)
@@ -421,22 +495,44 @@ class ResearchPipeline:
         # The complete ordered pool stays on the run for bounded replacements.
         # Only a separate copy is bounded for the Selector request.
         full_ranked = ranked
-        targets = plan.get("explicit_targets", [])
         coverage = match_explicit_targets(targets, full_ranked) if targets else {}
         if coverage:
             query_map = plan.get("target_queries", {})
+            target_execution: dict[str, list[dict[str, Any]]] = {}
+            for source, entries in run.metrics.get("source_query_audit", {}).items():
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    for target in entry.get("targets", []) if isinstance(entry.get("targets"), list) else []:
+                        if not isinstance(target, str):
+                            continue
+                        target_execution.setdefault(target, []).append({
+                            "source": source,
+                            "planned": entry.get("planned"),
+                            "executed": entry.get("executed"),
+                            "mode": entry.get("mode"),
+                            "field": entry.get("field"),
+                            "result_count": entry.get("result_count"),
+                            "error_code": entry.get("error_code"),
+                        })
             for item in coverage.get("targets", []):
                 item["query"] = query_map.get(item["target"])
                 item["query_covered"] = bool(item.get("query"))
+                item["query_execution"] = target_execution.get(item["target"], [])
             coverage["query_covered_targets"] = list(plan.get("query_covered_targets", []))
             coverage["query_uncovered_targets"] = list(plan.get("query_uncovered_targets", []))
+            coverage["source_query_audit"] = run.metrics.get("source_query_audit", {})
             for paper in full_ranked:
                 matches = coverage.get("paper_matches", {}).get(paper.paper_id, {})
                 direct = list(matches.get("direct_targets", []))
+                related = list(matches.get("related_targets", []))
                 abstract = list(matches.get("abstract_targets", []))
-                if direct or abstract:
+                if direct or related or abstract:
                     paper.metadata["target_matches"] = {
-                        "direct_title": direct, "abstract_only": abstract,
+                        "direct_title": direct, "related_title": related,
+                        "abstract_only": abstract,
                     }
         selector_pool, pool_audit = build_bounded_candidate_pool(
             full_ranked, k=run.top_k, merged_limit=self.settings.merged_candidate_limit,
@@ -446,6 +542,10 @@ class ResearchPipeline:
         for item in coverage.get("targets", []):
             item["selector_pool_direct_paper_ids"] = [
                 paper_id for paper_id in item.get("direct_title_paper_ids", [])
+                if paper_id in selector_ids
+            ]
+            item["selector_pool_related_paper_ids"] = [
+                paper_id for paper_id in item.get("related_title_paper_ids", [])
                 if paper_id in selector_ids
             ]
         coverage["selector_pool_ids"] = [paper.paper_id for paper in selector_pool]
@@ -537,6 +637,35 @@ class ResearchPipeline:
             self.store.event(run_id, "selector", event="finish", agent="llm_selector",
                              selected_ids=[p.paper_id for p in run.selected_papers], status=run.status)
             return self._finish(run, "selection", start, before, successes=len(run.selected_papers))
+
+    @staticmethod
+    def _summary_has_content(summary: PaperSummary) -> bool:
+        return bool(
+            summary.overview.strip() or summary.deep_analysis.strip()
+            or summary.research_question.strip() or summary.core_idea.strip()
+            or summary.relevance.strip() or summary.methods or summary.experiments
+            or summary.findings or summary.limitations or summary.author_claims
+            or summary.system_inferences or summary.speculative_ideas or summary.evidence
+        )
+
+    @classmethod
+    def _summary_status(cls, summary: PaperSummary | None, complete_scope: str) -> str:
+        """Derived display/audit state; machine scope and errors stay untouched."""
+        if summary is None:
+            return "missing"
+        if summary.summary_scope == "failed" or not cls._summary_has_content(summary):
+            return "failed"
+        complete = bool(
+            summary.summary_scope == complete_scope
+            and not summary.errors
+            and summary.overview.strip()
+            and summary.deep_analysis.strip()
+            and summary.research_question.strip()
+            and summary.core_idea.strip()
+            and summary.relevance.strip()
+            and summary.evidence
+        )
+        return "complete" if complete else "usable_partial"
 
     @staticmethod
     def _readable(paper: Paper) -> bool:
@@ -727,6 +856,36 @@ class ResearchPipeline:
                 return value
             run.summaries = await self._map(summarize, run.metrics["analysis_paper_ids"])
             _add_errors(run, [error for summary in run.summaries for error in summary.errors])
+            complete_scope = "demo_fixture" if run.mode == "demo" else "fulltext"
+            statuses = {
+                summary.paper_id: self._summary_status(summary, complete_scope)
+                for summary in run.summaries
+            }
+            status_counts: dict[str, int] = {}
+            for status in statuses.values():
+                status_counts[status] = status_counts.get(status, 0) + 1
+            run.metrics["summary_status_by_paper"] = statuses
+            run.metrics["complete_summary_ids"] = [
+                paper_id for paper_id, status in statuses.items() if status == "complete"
+            ]
+            run.metrics["usable_partial_summary_ids"] = [
+                paper_id for paper_id, status in statuses.items() if status == "usable_partial"
+            ]
+            run.metrics["failed_summary_ids"] = [
+                paper_id for paper_id, status in statuses.items() if status == "failed"
+            ]
+            run.metrics["missing_summary_ids"] = [
+                paper_id for paper_id in run.metrics["analysis_paper_ids"]
+                if paper_id not in statuses
+            ]
+            if run.metrics["missing_summary_ids"]:
+                status_counts["missing"] = len(run.metrics["missing_summary_ids"])
+            run.metrics["summary_status_counts"] = status_counts
+            run.metrics["complete_summary_count"] = len(run.metrics["complete_summary_ids"])
+            run.metrics["usable_partial_summary_count"] = len(run.metrics["usable_partial_summary_ids"])
+            run.metrics["summarized_count"] = (
+                run.metrics["complete_summary_count"] + run.metrics["usable_partial_summary_count"]
+            )
             run.metrics["fulltext_summary_count"] = sum(
                 summary.summary_scope == "fulltext"
                 and not summary.errors
@@ -734,6 +893,30 @@ class ResearchPipeline:
                 and bool(summary.deep_analysis.strip())
                 for summary in run.summaries
             )
+            run.metrics["research_chunk_audit"] = {
+                paper_id: {
+                    key: value for key, value in (
+                        (paper.metadata.get("research_audit") or {}).get("chunks", {}) or {}
+                    ).items()
+                    if key in {"total", "selected", "valid", "failed", "unread", "failed_by_subreason", "repair_used"}
+                }
+                for paper_id, paper in by_id.items()
+                if isinstance(paper.metadata.get("research_audit"), dict)
+            }
+            run.metrics["merge_input_audit"] = {
+                paper_id: {
+                    key: value for key, value in (
+                        (paper.metadata.get("research_audit") or {}).get("merge", {}) or {}
+                    ).items()
+                    if key in {
+                        "input_estimator", "budget", "original", "submitted", "mode",
+                        "lossy", "loss_kinds", "coverage_gaps", "merge_called",
+                        "merge_completed", "failure_reason",
+                    }
+                }
+                for paper_id, paper in by_id.items()
+                if isinstance(paper.metadata.get("research_audit"), dict)
+            }
             summaries_by_id = {summary.paper_id: summary for summary in run.summaries}
             for item in run.metrics.get("replacement_attempts", []):
                 if not isinstance(item, dict):
@@ -741,11 +924,11 @@ class ResearchPipeline:
                 summary = summaries_by_id.get(item.get("replacement_paper_id"))
                 if summary is not None:
                     item["summary_scope"] = summary.summary_scope
-                    item["summary_complete"] = summary.summary_scope == "fulltext" and not summary.errors
+                    item["summary_complete"] = self._summary_status(summary, complete_scope) == "complete"
             self._refresh_target_coverage(run, "summarize")
             run.status = "summarized" if run.summaries else "failed"
             return self._finish(run, "summarize", start, before,
-                                successes=sum(s.summary_scope != "failed" for s in run.summaries))
+                                successes=run.metrics.get("summarized_count", 0))
 
     async def generate_research_report(self, run_id: str) -> PipelineResult:
         async with self._lock(run_id):
@@ -764,7 +947,10 @@ class ResearchPipeline:
             except Exception as exc:
                 run.errors.append(_failure(exc, "report"))
             report = run.report
-            available = {s.paper_id for s in run.summaries if s.summary_scope != "failed" and s.research_question.strip()}
+            available = {
+                s.paper_id for s in run.summaries
+                if s.summary_scope != "failed" and self._summary_has_content(s)
+            }
             expected_scope = "demo_fixture" if run.mode == "demo" else "fulltext"
             summary_inputs_valid = bool(run.summaries) and all(
                 summary.summary_scope == expected_scope
@@ -836,5 +1022,10 @@ class ResearchPipeline:
         run.timings.append(StageTiming(stage="total", duration_seconds=time.perf_counter() - start,
                                        request_count=sum(t.request_count for t in run.timings),
                                        success_count=int(run.status == "completed"), error_count=len(run.errors)))
+        run.brief, run.delivery_status = build_research_brief(
+            papers=run.papers or run.selected_papers,
+            summaries=run.summaries,
+            report=run.report,
+        )
         self.store.save(run)
         return run

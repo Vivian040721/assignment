@@ -105,9 +105,7 @@ class DemoLLM:
         if task == "summarize_chunk":
             segments = [segment for segment in payload["segments"] if segment.get("text", "").strip()]
             segment = segments[0]
-            evidence = [{"paper_id": payload["paper"]["paper_id"],
-                         "page_number": segment.get("page_number"),
-                         "section": segment.get("section"), "quote": segment["text"][:140],
+            evidence = [{"quote": segment["text"][:140],
                          "claim": "This is fixture text, not an empirical finding.",
                          "evidence_type": "author_claim",
                          "source_segment_id": segment.get("segment_id")}]
@@ -123,8 +121,8 @@ class DemoLLM:
             }
         if task == "merge_paper_summary":
             evidence_ids = list(dict.fromkeys(
-                evidence_id for summary in payload["chunk_summaries"]
-                for evidence_id in summary.get("evidence_ids", [])
+                item["evidence_id"] for item in payload.get("verified_evidence", [])
+                if isinstance(item, dict) and isinstance(item.get("evidence_id"), str)
             ))
             return self._summary([
                 {"evidence_id": evidence_id} for evidence_id in evidence_ids[:3]

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Activity, BookOpen, ChevronDown, ChevronLeft, ChevronRight, Columns2, FileText, Gauge, MoreHorizontal, Plus, Settings2, X } from 'lucide-react';
+import { Activity, BookOpen, ChevronDown, ChevronLeft, ChevronRight, Columns2, FileText, Gauge, Maximize2, Minimize2, MoreHorizontal, Plus, Settings2, X } from 'lucide-react';
 import type { CSSProperties, DragEvent, KeyboardEvent } from 'react';
 import type { DockGroup, LayoutTab, PanelKind } from '../../../types/ui';
 import { layoutStore, useLayoutState } from '../../stores/layoutStore';
@@ -15,7 +15,7 @@ const TAB_MIME = 'application/x-paper-agent-dock-tab';
 const panelOptions: Array<{ kind: Exclude<PanelKind, 'paper'>; title: string; icon: typeof BookOpen }> = [
   { kind: 'papers', title: '论文', icon: BookOpen },
   { kind: 'report', title: '研究报告', icon: FileText },
-  { kind: 'activity', title: '活动记录', icon: Activity },
+  { kind: 'activity', title: '执行记录', icon: Activity },
   { kind: 'metrics', title: '性能数据', icon: Gauge },
 ];
 
@@ -37,6 +37,7 @@ export function RightDock({ hidden = false }: { hidden?: boolean }) {
     <header className="dock-header">
       <div className="dock-heading"><span className="dock-heading-mark"><BookOpen size={15}/></span><div><strong>研究资料</strong><small>{split ? '双组视图 · 拖动标签可移动' : '论文、报告与任务记录'}</small></div></div>
       <div className="dock-header-actions">
+        <button className={`dock-action ${layout.focusReading ? 'is-active' : ''}`} type="button" aria-label={layout.focusReading ? '退出专注阅读' : '进入专注阅读'} aria-pressed={layout.focusReading} title={layout.focusReading ? '退出专注阅读（Esc）' : '专注阅读：隐藏侧栏和对话，保留标签与会话'} onClick={() => layoutStore.toggleFocusReading()}>{layout.focusReading ? <Minimize2 size={15}/> : <Maximize2 size={15}/>}</button>
         <button className="dock-action" type="button" aria-label={split ? '合并分组' : '分成两个组'} title={split ? '合并分组' : '把当前标签分到第二组'} disabled={!split && !canSplit} onClick={() => split ? layoutStore.mergeGroups() : layoutStore.splitActiveTab()}><Columns2 size={15}/></button>
         <div className="add-panel-wrap">
           <button className="dock-action" type="button" aria-label="添加 Dock 面板" aria-expanded={addOpen} onClick={() => setAddOpen(value => !value)}><Plus size={16}/><ChevronDown size={11}/></button>

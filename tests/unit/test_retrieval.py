@@ -2,7 +2,9 @@ import asyncio
 
 import pytest
 
+from paper_agent.config import Settings
 from paper_agent.models import Paper
+from paper_agent.services.pipeline import ResearchPipeline
 from paper_agent.services.retrieval import (
     merge_dedupe_rank,
     normalize_arxiv_id,
@@ -17,8 +19,19 @@ def paper(pid, **kwargs):
 
 
 def test_doi_merge_preserves_source_details_and_input_objects():
-    left = paper("arxiv:2401.12345", doi="https://doi.org/10.1234/ABC", arxiv_id="2401.12345v2", sources=["arxiv"], pdf_url="https://arxiv.org/pdf/2401.12345", abstract="Short")
-    right = paper("openalex:W1", doi="doi:10.1234/abc", sources=["openalex"], pdf_url="https://example.org/a.pdf", pdf_urls=["https://example.org/b.pdf"], abstract="Longer and more complete abstract", citation_count=12, source_records=[{"id": "W1"}], metadata={"publisher": "Example"})
+    left = paper(
+        "arxiv:2401.12345", doi="https://doi.org/10.1234/ABC", arxiv_id="2401.12345v2",
+        sources=["arxiv"], source_records=[{"id": "2401.12345v2"}],
+        paper_url="https://arxiv.org/abs/2401.12345v2",
+        pdf_url="https://arxiv.org/pdf/2401.12345", abstract="Short",
+    )
+    right = paper(
+        "openalex:W1", doi="doi:10.1234/abc", sources=["openalex"],
+        source_records=[{"id": "W1"}], paper_url="https://doi.org/10.1234/abc",
+        pdf_url="https://example.org/a.pdf", pdf_urls=["https://example.org/b.pdf"],
+        abstract="Longer and more complete abstract", citation_count=12,
+        metadata={"publisher": "Example"},
+    )
     before = [p.model_dump() for p in [left, right]]
     result = merge_dedupe_rank([right, left], "agent memory")[0]
     assert result.doi == "10.1234/abc" and result.arxiv_id == "2401.12345"
@@ -27,7 +40,10 @@ def test_doi_merge_preserves_source_details_and_input_objects():
     assert len(result.pdf_urls) == 3 and result.abstract == right.abstract
     assert result.citation_count == 12 and result.metadata["publisher"] == "Example"
     assert len(result.metadata["retrieval_records"]) == 2
-    assert result.source_records == [{"id": "W1"}]
+    assert result.source_records == [{"id": "2401.12345v2"}, {"id": "W1"}]
+    assert result.metadata["paper_urls"] == [
+        "https://arxiv.org/abs/2401.12345v2", "https://doi.org/10.1234/abc",
+    ]
     assert [p.model_dump() for p in [left, right]] == before
     assert retrieval_counts([result]) == {"input_count": 2, "unique_count": 1, "duplicate_count": 1}
 
@@ -86,8 +102,70 @@ def test_ranking_is_reproducible_normalized_and_explained():
     assert ranked[0].ranking_details["reference_year"] == 2030
     assert ranked[0].ranking_details["title_hits"] == ["agent", "memory", "optimization"]
     assert ranked[0].ranking_reason
+    assert all(paper.final_score is None for paper in ranked)
+    assert all(not paper.selection_reason for paper in ranked)
+    assert all("selection" not in paper.metadata for paper in ranked)
     assert merge_dedupe_rank([], "anything") == []
     assert retrieval_counts([]) == {"input_count": 0, "unique_count": 0, "duplicate_count": 0}
+
+
+@pytest.mark.parametrize(("k", "available"), [(3, 12), (5, 12), (8, 12), (8, 2)])
+def test_pipeline_passes_top_k_and_independent_candidate_pool_to_selector(
+    tmp_path, k, available,
+):
+    async def run():
+        observed = {}
+        candidates = [
+            Paper(
+                paper_id=f"candidate-{index}", title=f"Agent memory candidate {index}",
+                abstract="Agent memory retrieval and reuse", authors=["Alice Chen"], year=2024,
+            )
+            for index in range(available)
+        ]
+
+        async def arxiv_source(query, limit, *, settings=None, client=None):
+            return [candidate.model_copy(deep=True) for candidate in candidates]
+
+        async def empty_openalex_source(query, limit, *, settings=None, client=None):
+            return []
+
+        async def recording_selector(idea, papers, requested_k, *, settings=None, llm=None):
+            # This test double observes the pipeline boundary; it is not an LLM validation.
+            observed["k"] = requested_k
+            observed["candidate_ids"] = [candidate.paper_id for candidate in papers]
+            selected = []
+            for rank, candidate in enumerate(papers[:min(requested_k, len(papers))], 1):
+                item = candidate.model_copy(deep=True)
+                item.rank = rank
+                item.status = "selected"
+                item.selection_reason = "Selected by the recording test double"
+                selected.append(item)
+            return selected
+
+        pipeline = ResearchPipeline(
+            Settings(
+                mode="live", top_k=k, candidate_limit=10,
+                output_dir=tmp_path / "runs", data_dir=tmp_path / "files",
+            ),
+            llm=object(), selector_fn=recording_selector,
+            search_arxiv_fn=arxiv_source, search_openalex_fn=empty_openalex_source,
+        )
+        searched = await pipeline.search_papers("agent memory", k, "agent memory")
+        assert len(searched.papers) == available
+        assert searched.metrics["full_candidate_count"] == available
+        assert searched.metrics["downstream_candidate_count"] == min(10, available)
+        selected = await pipeline.select_top_k_papers(searched.run_id)
+        return selected, observed
+
+    result, observed = asyncio.run(run())
+    expected_count = min(k, available)
+    assert observed["k"] == k
+    assert len(observed["candidate_ids"]) == min(10, available)
+    assert len(result.selected_papers) == expected_count
+    assert len({candidate.paper_id for candidate in result.selected_papers}) == expected_count
+    assert {candidate.paper_id for candidate in result.selected_papers} <= set(
+        observed["candidate_ids"]
+    )
 
 
 class FakeLLM:

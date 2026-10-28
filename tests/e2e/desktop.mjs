@@ -46,7 +46,7 @@ try {
   await expect(page.getByRole('heading', { name: '从一个研究问题开始' })).toBeVisible();
   const info = await page.evaluate(() => window.paperAgent.info());
   assert.equal(info.api_version, 3);
-  assert.equal(info.version, '0.2.2');
+  assert.equal(info.version, '0.3.0');
   assert.equal(path.resolve(info.data_root), profile);
   assert.equal('token' in info, false);
   const isolation = await page.evaluate(() => ({ node: typeof window.require, process: typeof window.process,
@@ -161,7 +161,7 @@ try {
 
   // Many tabs must remain legible and reachable through scroll/overflow.
   await page.getByRole('button', { name: '添加 Dock 面板' }).click();
-  await page.getByRole('menuitem', { name: '活动记录' }).click();
+  await page.getByRole('menuitem', { name: '执行记录' }).click();
   await expect(page.locator('.dock-overflow-trigger')).toBeVisible();
   const slots = page.locator('.dock-tab-slot');
   assert.ok(await slots.count() >= 4);
@@ -171,7 +171,7 @@ try {
   }
   await page.getByRole('button', { name: '更多资料标签' }).click();
   await expect(page.getByRole('menu')).toBeVisible();
-  await page.getByRole('menuitemradio', { name: /活动记录/ }).click();
+  await page.getByRole('menuitemradio', { name: /执行记录/ }).click();
   await expect(page.locator('.activity-view, .panel-empty')).toBeVisible();
   report.checks.push('dock-tabs-overflow-scroll-menu');
 
@@ -237,9 +237,13 @@ try {
   }), job.job_id);
   report.checks.push('actual-mcp-fixture-job-reload-no-duplicate-sse-replay');
 
-  await page.getByRole('tab', { name: /^活动记录。/ }).click();
+  await page.getByRole('tab', { name: /^执行记录。/ }).click();
+  const executionLog = page.locator('details.execution-log');
+  await expect(executionLog).toBeVisible();
+  assert.equal(await executionLog.evaluate(element => element.open), false);
+  await executionLog.locator(':scope > summary').click();
   await expect(page.locator('details.activity-card').first()).toBeVisible();
-  report.checks.push('activity-expandable-detail-cards');
+  report.checks.push('execution-log-default-collapsed-expandable-detail-cards');
 
   await page.getByRole('tab', { name: /^论文。/ }).click();
   await expect(page.locator('.paper-row').first()).toBeVisible({ timeout: 15_000 });
@@ -275,8 +279,8 @@ try {
   const reportChips = await page.locator('.report-status-row .status-chip').allTextContents();
   assert.ok(reportChips.includes('部分结果报告'), `unexpected report state chips: ${reportChips.join(' | ')}`);
   assert.ok(reportChips.includes('报告有效'), `missing validity chip: ${reportChips.join(' | ')}`);
-  assert.ok(reportChips.includes('演示完成'), `missing demo status chip: ${reportChips.join(' | ')}`);
-  const scopeChips = await page.locator('.report-coverage span').allTextContents();
+  assert.ok(reportChips.includes('已完成'), `missing execution status chip: ${reportChips.join(' | ')}`);
+  const scopeChips = await page.locator('.report-scope-line span').allTextContents();
   assert.ok(scopeChips.some(chip => chip.includes('演示样例')), `unexpected scope chips: ${scopeChips.join(' | ')}`);
   const renderedReport = await page.locator('.report-markdown').innerText();
   assert.match(renderedReport, /论文比较/);

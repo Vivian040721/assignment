@@ -59,6 +59,13 @@ def test_success_copy_atomic_safe_filename_and_tls_host_pinning(tmp_path):
 
     result = run_download(tmp_path, handler, original)
     assert result.status == "downloaded"
+    assert result.acquisition_status == "downloaded"
+    assert result.conversion_status == "not_attempted"
+    assert result.reading_status == "metadata_only"
+    assert result.pdf_artifact_id == hashlib.sha256(
+        f"pdf:{original.paper_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    assert result.markdown_artifact_id is None
     assert original.pdf_path is None and original.status == "metadata_only"
     assert original.metadata == {}
     path = Path(result.pdf_path)
@@ -75,10 +82,35 @@ def test_success_copy_atomic_safe_filename_and_tls_host_pinning(tmp_path):
 def test_unavailable_status_is_explicit(tmp_path, status):
     result = run_download(tmp_path, lambda request: httpx.Response(status))
     assert result.status == "no_open_access" and result.pdf_path is None
+    assert result.acquisition_status == "unavailable"
+    assert result.conversion_status == "not_attempted"
+    assert result.reading_status == "metadata_only"
+    assert result.pdf_artifact_id is None
     assert result.errors[-1].code == "access_unavailable"
     assert result.errors[-1].details["status_code"] == status
     assert result.metadata["downloads"]["request_count"] == 1
     assert not list(tmp_path.rglob("*.pdf"))
+
+
+def test_failed_refresh_preserves_existing_pdf_artifact(tmp_path):
+    path = tmp_path / "existing.pdf"
+    payload = pdf_bytes()
+    path.write_bytes(payload)
+    original = paper(
+        pdf_url="https://papers.example/removed.pdf",
+        pdf_path=str(path),
+        acquisition_status="downloaded",
+    )
+
+    result = run_download(tmp_path, lambda request: httpx.Response(404), original)
+
+    assert result.status == "no_open_access"
+    assert result.acquisition_status == "unavailable"
+    assert result.pdf_path == str(path)
+    assert result.pdf_artifact_id == hashlib.sha256(
+        f"pdf:{original.paper_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    assert path.read_bytes() == payload
 
 
 @pytest.mark.parametrize("content", [b"<html>Sign in</html>", b"%PDF-1.7\nthis is not a PDF"])
@@ -119,6 +151,8 @@ def test_timeout_retries_are_bounded(tmp_path):
 
     result = run_download(tmp_path, handler)
     assert result.status == "download_failed"
+    assert result.acquisition_status == "failed"
+    assert result.conversion_status == "not_attempted"
     assert count == 2 and result.metadata["downloads"]["retries"] == 1
     assert result.errors[-1].code == "timeout"
     assert "sensitive" not in result.model_dump_json()
@@ -285,8 +319,20 @@ def test_module_entry_no_candidate_and_original_unchanged(tmp_path):
     original = paper()
     result = asyncio.run(download_pdf(original, settings=configuration(tmp_path)))
     assert result.status == "no_open_access"
+    assert result.acquisition_status == "unavailable"
+    assert result.conversion_status == "not_attempted"
+    assert result.reading_status == "metadata_only"
     assert result.errors[-1].code == "no_open_access"
     assert original.status == "metadata_only" and not original.errors
+
+
+def test_unavailable_pdf_does_not_hide_abstract_reading_level(tmp_path):
+    result = asyncio.run(download_pdf(
+        paper(abstract="A real abstract remains available for limited analysis."),
+        settings=configuration(tmp_path),
+    ))
+    assert result.acquisition_status == "unavailable"
+    assert result.reading_status == "abstract_only"
 
 
 def test_dns_failure_becomes_per_paper_error(tmp_path):

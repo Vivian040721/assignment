@@ -58,16 +58,28 @@ def test_real_pymupdf4llm_preserves_text_and_exact_page_provenance(tmp_path):
     result = asyncio.run(convert_pdf(original, settings=config(tmp_path)))
     assert original.model_dump() == before
     assert result.status == "converted" and result.error is None
+    assert result.acquisition_status == "downloaded"
+    assert result.conversion_status == "converted"
+    assert result.reading_status == "fulltext"
+    assert result.pdf_artifact_id == hashlib.sha256(
+        f"pdf:{original.paper_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    assert result.markdown_artifact_id == hashlib.sha256(
+        f"markdown:{original.paper_id}".encode("utf-8")
+    ).hexdigest()[:20]
     quality = result.fulltext_quality
     assert quality["page_count"] == quality["extracted_pages"] == quality["text_page_count"] == 3
     assert quality["complete"] is True and quality["nonempty_ratio"] == 1.0
     assert quality["ocr_enabled"] is False
+    assert quality["semantic_completeness"] == "not_assessed"
+    assert quality["formula_table_layout_verified"] is False
     markdown = Path(result.markdown_path).read_text(encoding="utf-8")
     assert all(word in markdown for word in ["Abstract", "Methods", "References", "reproducible"])
     assert Path(result.markdown_path).parent == (tmp_path / "data" / "markdown")
     assert Path(result.markdown_path).name == hashlib.sha256(original.paper_id.encode()).hexdigest()+".md"
     assert [mapping.page_number for mapping in result.page_map] == [1, 2, 3]
-    for mapping in result.page_map:
+    for number, mapping in enumerate(result.page_map, start=1):
+        assert mapping.text.startswith(f"<!-- PDF page {number} -->")
         assert markdown[mapping.start_char:mapping.end_char] == mapping.text
     assert not list(Path(result.markdown_path).parent.glob("*.tmp"))
     assert "语义完整" in quality["warnings"][0]
@@ -110,9 +122,39 @@ def test_file_failures_clear_stale_artifacts_and_preserve_input(tmp_path, kind, 
     original.fulltext_quality = {"complete": True}
     result = convert(tmp_path, original)
     assert result.status == "conversion_failed" and result.errors[-1].code == code
+    assert result.acquisition_status == "not_attempted"
+    assert result.conversion_status == "failed"
+    assert result.reading_status == "metadata_only"
     assert result.markdown_path is None and result.page_map == []
+    assert result.markdown_artifact_id is None
     assert result.fulltext_quality["complete"] is False
     assert original.markdown_path == "stale.md" and original.fulltext_quality["complete"] is True
+
+
+def test_failed_refresh_preserves_readable_markdown_and_its_mapping(tmp_path):
+    pdf_path = tmp_path / "broken.pdf"
+    pdf_path.write_bytes(b"%PDF-broken")
+    markdown_path = tmp_path / "existing.md"
+    text = "Previously converted readable text remains available."
+    markdown_path.write_text(text, encoding="utf-8")
+    original = record(pdf_path)
+    original.markdown_path = str(markdown_path)
+    original.page_map = [PageMapping(page_number=1, text=text, start_char=0, end_char=len(text))]
+    original.fulltext_quality = {"complete": True, "page_count": 1}
+    original.conversion_status = "converted"
+    original.reading_status = "fulltext"
+
+    result = convert(tmp_path, original)
+
+    assert result.status == "conversion_failed"
+    assert result.conversion_status == "failed"
+    assert result.reading_status == "fulltext"
+    assert result.markdown_path == str(markdown_path)
+    assert result.page_map == original.page_map
+    assert result.markdown_artifact_id == hashlib.sha256(
+        f"markdown:{original.paper_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    assert markdown_path.read_text(encoding="utf-8") == text
 
 
 def test_password_pdf_is_explicit_failure(tmp_path):
@@ -130,6 +172,11 @@ def test_scan_without_text_is_not_claimed_complete(tmp_path):
         document.save(path)
     result = convert(tmp_path, record(path))
     assert result.status == "conversion_failed"
+    assert result.acquisition_status == "downloaded"
+    assert result.conversion_status == "failed"
+    assert result.reading_status == "metadata_only"
+    assert result.pdf_artifact_id is not None
+    assert result.markdown_artifact_id is None
     assert result.errors[-1].code == "scanned_pdf"
     assert result.fulltext_quality["suspected_scanned_pages"] == [1]
     assert result.fulltext_quality["complete"] is False and result.markdown_path is None
@@ -140,8 +187,12 @@ def test_empty_pdf_page_is_not_claimed_complete(tmp_path):
     with pymupdf.open() as document:
         document.new_page()
         document.save(path)
-    result = convert(tmp_path, record(path))
+    original = record(path)
+    original.abstract = "The abstract remains usable when no PDF text can be extracted."
+    result = convert(tmp_path, original)
     assert result.errors[-1].code == "no_extractable_text"
+    assert result.conversion_status == "failed"
+    assert result.reading_status == "abstract_only"
     assert result.fulltext_quality["nonempty_ratio"] == 0.0
 
 
@@ -155,10 +206,16 @@ def test_missing_middle_page_saves_only_partial_and_keeps_physical_page_numbers(
     result = convert(tmp_path, record(make_pdf(tmp_path, [BODY] * 3)), parser)
     quality = result.fulltext_quality
     assert result.status == "partial_fulltext" and quality["complete"] is False
+    assert result.conversion_status == "partial"
+    assert result.reading_status == "partial_fulltext"
+    assert result.markdown_artifact_id is not None
     assert quality["page_count"] == 3 and quality["extracted_pages"] == 2
     assert quality["missing_pages"] == [2] and quality["text_page_count"] == 2
-    assert result.page_map[1].text == "" and result.page_map[2].page_number == 3
-    assert Path(result.markdown_path).is_file()
+    assert result.page_map[1].text == "<!-- PDF page 2 -->\n\n"
+    assert result.page_map[2].page_number == 3
+    markdown = Path(result.markdown_path).read_text(encoding="utf-8")
+    assert all(mapping.end_char > mapping.start_char for mapping in result.page_map)
+    assert all(markdown[item.start_char:item.end_char] == item.text for item in result.page_map)
 
 
 def test_bad_encoding_and_source_text_loss_are_not_upgraded(tmp_path):

@@ -197,6 +197,176 @@ def target_in_text(target: str, text: str) -> bool:
     return _contains_token_sequence(_target_tokens(text), _target_tokens(target))
 
 
+def target_title_level(target: str, title: str) -> str | None:
+    """Classify a title-name clue without promoting it to verified identity.
+
+    ``title_direct`` means the normalized name starts the title and is followed
+    only by a subtitle delimiter (or nothing). ``title_related`` means the name
+    occurs with a prefix or additional words, so it may be an extension,
+    variant or downstream application rather than the original work.
+    """
+    target_tokens = _target_tokens(target)
+    title_tokens = _target_tokens(title)
+    if not target_tokens or not _contains_token_sequence(title_tokens, target_tokens):
+        return None
+    if title_tokens == target_tokens:
+        return "title_direct"
+    raw = " ".join(unicodedata.normalize("NFKC", title).casefold().split())
+    matches = list(re.finditer(r"[a-z0-9]+|[\u3400-\u9fff]", raw))
+    words = [match.group(0) for match in matches]
+    width = len(target_tokens)
+    for index in range(0, len(words) - width + 1):
+        if words[index:index + width] != target_tokens:
+            continue
+        prefix = words[:index]
+        end = matches[index + width - 1].end()
+        next_start = matches[index + width].start() if index + width < len(matches) else len(raw)
+        between = raw[end:next_start]
+        subtitle = (
+            any(marker in between for marker in (":", "：", "—", "|"))
+            or bool(re.search(r"\s[-–]\s", between))
+        )
+        if not prefix and (not between.strip() or subtitle):
+            return "title_direct"
+        return "title_related"
+    return "title_related"
+
+
+def _user_exact_title(target: str, title: str) -> bool:
+    target_tokens = _target_tokens(target)
+    return len(target_tokens) >= 4 and target_tokens == _target_tokens(title)
+
+
+def _safe_title_phrase(value: str) -> str | None:
+    """Keep a user-supplied name safe for a source-native title field."""
+    text = unicodedata.normalize("NFKC", value)
+    text = re.sub(r"[\x00-\x1f\x7f\"\\]", " ", text)
+    text = re.sub(r"[^\w\s\-.'\u3400-\u9fff]", " ", text, flags=re.UNICODE)
+    text = " ".join(text.split()).strip(" .-'")
+    return text[:200] if text and len(text) <= 200 else None
+
+
+def build_source_queries(
+    source: str, queries: list[str], targets: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Translate target-only planned queries into source-native title lookups.
+
+    This stays inside the existing three-query/per-source request budget. Broad
+    planning queries and the independent ranking_query are left unchanged.
+    """
+    output: list[dict[str, Any]] = []
+    for query in queries:
+        matched = [
+            target for target in (targets or [])
+            if isinstance(target, str) and _target_only_query(query, [target])
+        ]
+        entry: dict[str, Any] = {
+            "planned": query, "executed": query, "mode": "auto",
+            "field": None, "targets": matched,
+        }
+        if matched:
+            phrase = _safe_title_phrase(matched[0])
+            if phrase:
+                if source == "arxiv":
+                    entry.update(executed=f'ti:"{phrase}"', mode="title", field="ti")
+                elif source == "openalex":
+                    entry.update(
+                        executed=f'title.search:"{phrase}"', mode="title",
+                        field="title.search",
+                    )
+        output.append(entry)
+    return output
+
+
+def match_explicit_targets(targets: list[str], papers: list[Paper]) -> dict[str, Any]:
+    """Separate direct title clues, related titles, abstract mentions and absence."""
+    items: list[dict[str, Any]] = []
+    paper_matches: dict[str, dict[str, list[Any]]] = {
+        paper.paper_id: {
+            "direct_targets": [], "related_targets": [],
+            "abstract_targets": [], "identity_basis": [],
+        } for paper in papers
+    }
+    for target in targets:
+        direct: list[str] = []
+        related: list[str] = []
+        abstract: list[str] = []
+        exact_title_ids: list[str] = []
+        for paper in papers:
+            level = target_title_level(target, paper.title)
+            if level == "title_direct":
+                direct.append(paper.paper_id)
+                paper_matches[paper.paper_id]["direct_targets"].append(target)
+                if _user_exact_title(target, paper.title):
+                    exact_title_ids.append(paper.paper_id)
+            elif level == "title_related":
+                related.append(paper.paper_id)
+                paper_matches[paper.paper_id]["related_targets"].append(target)
+            elif target_in_text(target, paper.abstract):
+                abstract.append(paper.paper_id)
+                paper_matches[paper.paper_id]["abstract_targets"].append(target)
+            if level:
+                paper_matches[paper.paper_id]["identity_basis"].append({
+                    "target": target, "level": level,
+                    "basis": (
+                        "exact_user_title" if _user_exact_title(target, paper.title)
+                        else "title_starts_with_target" if level == "title_direct"
+                        else "title_contains_target_with_modifier"
+                    ),
+                })
+        if exact_title_ids:
+            identity_status = "confirmed_by_user_title"
+        elif direct:
+            identity_status = "unconfirmed_direct_title"
+        elif related:
+            identity_status = "unconfirmed_related_title"
+        elif abstract:
+            identity_status = "unconfirmed_abstract_mention"
+        else:
+            identity_status = "unresolved"
+        status = (
+            "title_direct" if direct else "title_related" if related
+            else "abstract_mention" if abstract else "unresolved"
+        )
+        items.append({
+            "target": target,
+            "normalized": " ".join(_target_tokens(target)),
+            "status": status,
+            "direct_title_paper_ids": direct,
+            "related_title_paper_ids": related,
+            "abstract_mention_paper_ids": abstract,
+            "identity_status": identity_status,
+            "identity_confirmed": bool(exact_title_ids),
+            "identity_basis": (
+                ["exact_user_title"] if exact_title_ids
+                else ["short_name_only", "title_starts_with_target"] if direct
+                else ["short_name_only", "title_contains_target_with_modifier"] if related
+                else ["short_name_only", "abstract_mention_only"] if abstract
+                else ["no_name_clue_in_retrieved_metadata"]
+            ),
+        })
+    return {
+        "explicit_targets": list(targets),
+        "targets": items,
+        "paper_matches": paper_matches,
+        "title_direct_count": sum(bool(item["direct_title_paper_ids"]) for item in items),
+        "title_related_count": sum(
+            not item["direct_title_paper_ids"] and bool(item["related_title_paper_ids"])
+            for item in items
+        ),
+        "title_match_count": sum(bool(item["direct_title_paper_ids"]) for item in items),
+        "abstract_mention_count": sum(
+            not item["direct_title_paper_ids"] and not item["related_title_paper_ids"]
+            and bool(item["abstract_mention_paper_ids"])
+            for item in items
+        ),
+        "not_retrieved_count": sum(
+            not item["direct_title_paper_ids"] and not item["related_title_paper_ids"]
+            and not item["abstract_mention_paper_ids"] for item in items
+        ),
+    }
+
+
 def normalize_explicit_targets(
     idea: str, values: Any,
 ) -> tuple[list[str], dict[str, Any]]:
@@ -240,43 +410,6 @@ def normalize_explicit_targets(
         accepted.append(display)
     audit["accepted"] = list(accepted)
     return accepted, audit
-
-
-def match_explicit_targets(targets: list[str], papers: list[Paper]) -> dict[str, Any]:
-    """Separate direct title matches, abstract-only mentions and absence."""
-    items: list[dict[str, Any]] = []
-    paper_matches: dict[str, dict[str, list[str]]] = {
-        paper.paper_id: {"direct_targets": [], "abstract_targets": []} for paper in papers
-    }
-    for target in targets:
-        direct: list[str] = []
-        abstract: list[str] = []
-        for paper in papers:
-            if target_in_text(target, paper.title):
-                direct.append(paper.paper_id)
-                paper_matches[paper.paper_id]["direct_targets"].append(target)
-            elif target_in_text(target, paper.abstract):
-                abstract.append(paper.paper_id)
-                paper_matches[paper.paper_id]["abstract_targets"].append(target)
-        status = "title_match" if direct else "abstract_mention" if abstract else "not_retrieved"
-        items.append({
-            "target": target,
-            "normalized": " ".join(_target_tokens(target)),
-            "status": status,
-            "direct_title_paper_ids": direct,
-            "abstract_mention_paper_ids": abstract,
-        })
-    return {
-        "explicit_targets": list(targets),
-        "targets": items,
-        "paper_matches": paper_matches,
-        "title_match_count": sum(bool(item["direct_title_paper_ids"]) for item in items),
-        "abstract_mention_count": sum(
-            not item["direct_title_paper_ids"] and bool(item["abstract_mention_paper_ids"])
-            for item in items
-        ),
-        "not_retrieved_count": sum(not item["direct_title_paper_ids"] and not item["abstract_mention_paper_ids"] for item in items),
-    }
 
 
 def build_bounded_candidate_pool(

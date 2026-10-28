@@ -173,7 +173,7 @@ def create_app(data_root: Path, endpoint: dict, shutdown, *, settings: Settings 
     @asynccontextmanager
     async def lifespan(app):
         manager = Workbench(base_settings, root=data_root / "service", config_path=data_root / "config.json",
-                            research_runner=runner)
+                            research_runner=runner, private_secrets=(endpoint["token"],))
         app.state.workbench, registry.manager = manager, manager
         app.state.service_data_root = data_root.resolve()
         async with mcp_app.router.lifespan_context(mcp_app):
@@ -200,8 +200,10 @@ def create_app(data_root: Path, endpoint: dict, shutdown, *, settings: Settings 
                 (manager.root / "sessions" / (session["session_id"] + ".json")).unlink(missing_ok=True)
                 raise
         rows = [{"run_id": job["job_id"], "job_id": job["job_id"], "idea": job["idea"],
-                 "status": job["status"], "mode": job["mode"],
-                 "execution_mode": job["execution_mode"], "updated_at": job["updated_at"]}
+                 "status": job["status"], "delivery_status": job.get("delivery_status"), "mode": job["mode"],
+                 "execution_mode": job["execution_mode"],
+                 "requested_execution_mode": job.get("requested_execution_mode"),
+                 "updated_at": job["updated_at"]}
                 | {"conversation_id": job.get("conversation_id"), "action": job.get("action", "research")}
                 for job in sorted(manager.jobs.values(), key=lambda item: item["updated_at"], reverse=True)]
         return JSONResponse(manager._redact_public(rows))

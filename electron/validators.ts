@@ -132,10 +132,10 @@ export function validateSendMessage(value: unknown): SendMessage {
   if (input.query !== undefined) result.query = boundedString(input.query, '检索问题', 1000, true);
   if (input.top_k !== undefined) result.top_k = finiteNumber(input.top_k, '论文数量', 1, 15, true);
   if (input.execution_mode !== undefined) {
-    if (input.execution_mode !== 'sequential' && input.execution_mode !== 'concurrent') {
+    if (!['auto', 'parallel', 'sequential', 'concurrent'].includes(input.execution_mode as string)) {
       throw new InputError('执行模式不正确。');
     }
-    result.execution_mode = input.execution_mode;
+    result.execution_mode = input.execution_mode as SendMessage['execution_mode'];
   }
   if (input.mode !== undefined) {
     if (input.mode !== 'live' && input.mode !== 'demo') throw new InputError('研究模式不正确。');
@@ -202,7 +202,7 @@ export function validatePublicConfig(value: unknown): PublicConfig {
       typeof input.model !== 'string' || typeof input.api_key_configured !== 'boolean' ||
       typeof input.openalex_api_key_configured !== 'boolean' || typeof input.thinking_enabled !== 'boolean' ||
       typeof input.http_proxy !== 'string' || !Number.isInteger(input.default_top_k) ||
-      (input.default_execution_mode !== 'concurrent' && input.default_execution_mode !== 'sequential') ||
+      !['auto', 'parallel', 'sequential', 'concurrent'].includes(input.default_execution_mode as string) ||
       !Number.isInteger(input.concurrency) || typeof input.llm_timeout !== 'number' ||
       typeof input.http_timeout !== 'number') {
     throw new InputError('无法读取模型设置。');
@@ -213,7 +213,7 @@ export function validatePublicConfig(value: unknown): PublicConfig {
     openalex_api_key_configured: input.openalex_api_key_configured,
     thinking_enabled: input.thinking_enabled, http_proxy: input.http_proxy,
     default_top_k: input.default_top_k as number,
-    default_execution_mode: input.default_execution_mode,
+    default_execution_mode: input.default_execution_mode as PublicConfig['default_execution_mode'],
     concurrency: input.concurrency as number,
     llm_timeout: input.llm_timeout, http_timeout: input.http_timeout,
   };

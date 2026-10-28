@@ -1,15 +1,17 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, BookOpen, CircleAlert, Clock3, FileText, LoaderCircle, PanelRightClose, PanelRightOpen, Search, ShieldCheck, Square, Sparkles } from 'lucide-react';
-import type { Action, Message } from '../../../types/contracts';
+import type { Action, ExecutionMode, Message } from '../../../types/contracts';
 import { isReadOnlyConversation } from '../../../types/contracts';
 import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStore';
 import { isJobActive, statusLabel } from '../../../utils/status';
 import { formatDate } from '../../../utils/format';
-import { errorLabel, kindLabel, stageLabel } from '../../../utils/labels';
-import { isTerminalResult, partialReasons, rankingForResult, rankingModeLabel } from '../../../utils/papers';
-import { eventMessage } from '../../../utils/activity';
+import { kindLabel, stageLabel } from '../../../utils/labels';
+import { isTerminalResult } from '../../../utils/papers';
+import { publicEventMessage } from '../../../utils/activity';
+import { deliveryStatusFor, reportArtifactFor } from '../../../utils/researchBrief';
 import { layoutStore, useLayoutState } from '../../stores/layoutStore';
 import { MarkdownContent } from '../common/MarkdownContent';
+import { ResearchBriefView } from '../common/ResearchBriefView';
 
 const suggestions = [
   '长期记忆如何降低 Agent 的推理成本？',
@@ -26,6 +28,8 @@ export function Conversation() {
   const draft = state.drafts[draftKey] ?? '';
   const messages = state.conversation?.messages ?? [];
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const resultAnchorRef = useRef<HTMLDivElement | null>(null);
+  const lastTerminalAnchor = useRef('');
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const isNearBottom = useRef(true);
   const [showJump, setShowJump] = useState(false);
@@ -34,7 +38,15 @@ export function Conversation() {
   const charCount = Array.from(draft).length;
   const canSubmit = draft.trim().length >= (state.action === 'research' ? 3 : 1) && !state.loadingConversation && !readOnly && !jobActive && !state.sending;
   const lastEvent = state.activeJob?.events.at(-1);
-  const liveEvents = (state.activeJob?.events ?? []).slice(-4);
+  const liveEvents = (state.activeJob?.events ?? [])
+    .filter(event => event.kind !== 'error' && event.stage !== 'error')
+    .slice(-4);
+  const resultOwner = state.resultJob ?? state.activeJob;
+  const result = resultOwner?.result ?? state.conversation?.result;
+  const terminalKey = result && !jobActive && isTerminalResult(result)
+    ? `${resultOwner?.job_id ?? 'conversation'}:${result.run_id ?? 'result'}`
+    : '';
+  const visibleMessages = terminalKey ? messages.filter(message => message.role !== 'status') : messages;
 
   useLayoutEffect(() => {
     const query = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -56,6 +68,21 @@ export function Conversation() {
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) return;
+    if (terminalKey) {
+      if (lastTerminalAnchor.current !== terminalKey) {
+        lastTerminalAnchor.current = terminalKey;
+        isNearBottom.current = false;
+        setShowJump(false);
+        requestAnimationFrame(() => {
+          const anchor = resultAnchorRef.current;
+          if (!anchor) return;
+          const offset = anchor.getBoundingClientRect().top - timeline.getBoundingClientRect().top + timeline.scrollTop - 10;
+          timeline.scrollTo({ top: Math.max(0, offset) });
+        });
+      }
+      return;
+    }
+    lastTerminalAnchor.current = '';
     if (messages.length === 0 && !state.activeJob) {
       // The welcome surface fills the viewport; scrolling it to the bottom
       // hides its heading and suggestions.
@@ -69,7 +96,7 @@ export function Conversation() {
     } else {
       setShowJump(true);
     }
-  }, [state.conversationId, messages.length, messages.at(-1)?.content.length, state.activeJob?.updated_at, lastEvent?.seq, reducedMotion]);
+  }, [state.conversationId, messages.length, messages.at(-1)?.content.length, state.activeJob?.updated_at, lastEvent?.seq, reducedMotion, terminalKey]);
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -93,25 +120,10 @@ export function Conversation() {
     void submit();
   };
 
-  const result = state.activeJob?.result ?? state.conversation?.result;
-  const analysisIds = result?.metrics?.analysis_paper_ids;
-  const analysisCount = Array.isArray(analysisIds) ? analysisIds.length : 0;
-  const ranking = rankingForResult(result ?? null);
-  const rankingFallback = ranking?.requested === 'semantic' && ranking.actual !== 'semantic';
-  const reasons = result ? partialReasons(result) : [];
-  const incompleteReasons = reasons.filter(reason => reason.kind === 'partial');
-  const shownReasons = incompleteReasons.length ? incompleteReasons : reasons;
-  const showPartialNote = Boolean(result && isTerminalResult(result)
-    && ['partial', 'failed', 'cancelled'].includes(result.status));
-  const fulltextSummaryValue = result?.metrics?.fulltext_summary_count;
-  const fulltextSummaryCount = typeof fulltextSummaryValue === 'number' ? fulltextSummaryValue : null;
-  const replacementValue = result?.metrics?.replacements;
-  const replacementCount = Array.isArray(replacementValue) ? replacementValue.length : 0;
   return <main className="conversation-shell" aria-label="研究对话">
     <header className="conversation-header">
       <div className="conversation-heading"><span className="header-kicker">研究空间</span><h1 title={title}>{title}</h1></div>
       <div className="header-controls">
-        <span className={`model-indicator ${state.config?.api_key_configured ? 'is-ready' : ''}`} title="来自桌面服务公开配置状态，不代表联网验证"><i/>{state.config?.model ?? '服务连接中'}</span>
         <button className="icon-button dock-toggle" type="button" aria-label={layout.dockOpen ? '收起资料 Dock' : '打开资料 Dock'} title={layout.dockOpen ? '收起资料 Dock' : '打开资料 Dock'} onClick={() => layoutStore.toggleDock()}>{layout.dockOpen ? <PanelRightClose size={17}/> : <PanelRightOpen size={17}/>}</button>
       </div>
     </header>
@@ -127,35 +139,20 @@ export function Conversation() {
       {state.loadingConversation && <div className="timeline-loading" aria-live="polite"><span className="skeleton-line wide"/><span className="skeleton-line"/><span className="skeleton-line medium"/></div>}
       {!state.loadingConversation && messages.length === 0 && !state.activeJob && <Welcome onChoose={value => workspaceStore.setDraft(value)}/>}
       <div className="message-thread">
-        {!state.loadingConversation && messages.map((message, index) => <MessageRow key={message.id || `${message.role}:${index}`} message={message}/>) }
-        {state.activeJob && <div className="job-state-card"><div className={`job-state-icon status-${state.activeJob.status}`}><LoaderCircle size={16} className={jobActive ? 'spin' : ''}/></div><div><strong>{state.activeJob.action === 'chat' ? '讨论任务' : '研究任务'} · {statusLabel(state.activeJob.status)}</strong><p>{state.activeJob.idea}</p><small>更新时间 {formatDate(state.activeJob.updated_at)} · 任务 ID {state.activeJob.job_id}</small></div></div>}
-        {state.activeJob && <section className="live-progress" aria-label="任务实时进度">
-          <div className="live-progress-head"><span className={`live-dot ${jobActive ? 'is-live' : ''}`}/><strong>{jobActive ? '实时进度' : '任务进度'}</strong><span>{liveEvents.length ? `最近 ${liveEvents.length} 条` : '等待事件'}</span></div>
+        {!state.loadingConversation && visibleMessages.map((message, index) => <MessageRow key={message.id || `${message.role}:${index}`} message={message}/>) }
+        {state.activeJob && jobActive && <div className="job-state-card"><div className={`job-state-icon status-${state.activeJob.status}`}><LoaderCircle size={16} className="spin"/></div><div><strong>{state.activeJob.action === 'chat' ? '讨论任务' : '研究任务'} · {statusLabel(state.activeJob.status)}</strong><p>{state.activeJob.idea}</p></div></div>}
+        {state.activeJob && jobActive && <section className="live-progress" aria-label="任务实时进度">
+          <div className="live-progress-head"><span className="live-dot is-live"/><strong>实时进度</strong><span>{liveEvents.length ? `最近 ${liveEvents.length} 条` : '等待事件'}</span></div>
           {liveEvents.length ? <ol role="log" aria-live="polite" aria-relevant="additions text">{liveEvents.map(event => <li key={`${event.seq}:${event.kind}`}>
             <span className="live-stage">{event.stage ? stageLabel(event.stage) : kindLabel(event.kind)}</span>
-            <span className="live-message">{eventMessage(event) || (event.kind === 'trace' ? '阶段记录' : kindLabel(event.kind))}</span>
+            <span className="live-message">{publicEventMessage(event) || (event.kind === 'trace' ? '阶段记录' : kindLabel(event.kind))}</span>
             <time>{formatDate(event.timestamp)}</time>
           </li>)}</ol> : <p>正在等待服务端记录进度…</p>}
-          {state.activeJob.error && <p className="live-error" role="alert">{errorLabel({ message: state.activeJob.error })}</p>}
         </section>}
-        {result && <button className="result-link" type="button" onClick={() => layoutStore.openPanel('report')}><FileText size={16}/><span>{result.metrics?.report_valid === true ? (result.status === 'completed' || result.status === 'demo_completed' ? '研究报告已就绪' : '部分结果报告已生成') : '研究结果与报告状态可查看'}</span><span className="result-paper-count">{result.selected_papers.length} 篇原始 Top-k</span><ArrowUp size={14}/></button>}
-        {result && <div className="result-facts">
-          <span>来源 <strong>{Object.entries(result.source_counts ?? {}).map(([name, count]) => `${name} ${count}`).join(' · ') || '—'}</strong></span>
-          <span>排序 <strong>{rankingModeLabel(ranking)}{rankingFallback ? '（已降级）' : ''}</strong></span>
-          <span>候选 <strong>{result.papers?.length ?? 0}</strong></span>
-          <span>分析 <strong>{analysisCount}</strong></span>
-          <span>全文总结 <strong>{fulltextSummaryCount ?? '—'}</strong></span>
-          <span>替补 <strong>{replacementCount}</strong></span>
-          <span>工具 <strong>{result.tool_calls?.length ?? 0}</strong></span>
-        </div>}
-        {showPartialNote && <div className="partial-note">
-          <strong>部分结果原因</strong>
-          {shownReasons.length
-            ? <span>{shownReasons.slice(0, 2).map(reason => reason.title).join('；')}{shownReasons.length > 2 ? `；另有 ${shownReasons.length - 2} 类` : ''}。</span>
-            : <span>任务保留了已完成的内容；未完成阶段不会显示为成功。</span>}
-          <button type="button" className="inline-link-button" onClick={() => layoutStore.openPanel('activity')}>查看活动记录</button>
-        </div>}
-        {state.activeJob?.error && <div className="job-error" role="alert"><CircleAlert size={16}/><span>{state.activeJob.error}</span><button type="button" className="inline-link-button" onClick={() => layoutStore.openPanel('activity')}>查看活动记录</button></div>}
+        {result && <div className="reading-anchor" ref={resultAnchorRef} aria-hidden="true"/>}
+        {result && <ResearchBriefView result={result} job={resultOwner}/>}
+        {result && !result.brief && !deliveryStatusFor(result, resultOwner) && (reportArtifactFor(result, resultOwner?.artifacts ?? []) || result.report?.markdown) && <button className="result-link" type="button" onClick={() => layoutStore.openPanel('report')}><FileText size={16}/><span>阅读旧记录中的完整研究报告</span><span className="result-paper-count">{result.selected_papers.length} 篇精选论文</span><ArrowUp size={14}/></button>}
+        {state.activeJob?.error && !result && <div className="job-error" role="alert"><CircleAlert size={16}/><span>任务未能完成，已有资料和执行记录已保留。</span></div>}
       </div>
     </div>
     {showJump && <button className="jump-latest" type="button" onClick={() => { isNearBottom.current = true; timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight, behavior: reducedMotion ? 'auto' : 'smooth' }); setShowJump(false); }}><ArrowDown size={14}/>跳到最新</button>}
@@ -169,9 +166,16 @@ export function Conversation() {
         <textarea ref={composerRef} aria-label={readOnly ? '旧版记录只读' : state.action === 'research' ? '研究问题' : '讨论消息'} aria-describedby="composer-hint composer-count" enterKeyHint="send" maxLength={12000} value={draft} onChange={event => workspaceStore.setDraft(event.target.value)} onKeyDown={keyDown} placeholder={readOnly ? '旧版记录仅供阅读' : jobActive ? '任务进行中；可以先输入下一条，完成后再发送。' : state.action === 'research' ? '描述你想研究的问题…' : '继续讨论当前研究…'} rows={3} disabled={state.loadingConversation || readOnly}/>
         <div className="composer-controls">
           <div className="composer-options">{state.action === 'research' && <>
-            <label>Top-k <select aria-label="入选论文数 Top-k" value={state.topK} disabled={jobActive || state.sending} onChange={event => workspaceStore.setTopK(Number(event.target.value))}>{![3, 5, 8, 10, 15].includes(state.topK) && <option value={state.topK}>{state.topK} 篇</option>}<option value={3}>3 篇</option><option value={5}>5 篇</option><option value={8}>8 篇</option><option value={10}>10 篇</option><option value={15}>15 篇</option></select></label>
-            <span className="option-separator"/>
-            <label>执行 <select aria-label="研究执行方式" value={state.executionMode} disabled={jobActive || state.sending} onChange={event => workspaceStore.setExecutionMode(event.target.value as 'concurrent' | 'sequential')}><option value="concurrent">并行</option><option value="sequential">顺序</option></select></label>
+            <label>精选论文 <select aria-label="精选论文数量" value={state.topK} disabled={jobActive || state.sending} onChange={event => workspaceStore.setTopK(Number(event.target.value))}>{![3, 5, 8].includes(state.topK) && <option value={state.topK}>其他 {state.topK} 篇</option>}<option value={3}>3 篇</option><option value={5}>5 篇</option><option value={8}>8 篇</option></select></label>
+            <details className="advanced-research-settings">
+              <summary>高级设置</summary>
+              <div className="advanced-settings-popover">
+                <label>执行方式 <select aria-label="研究执行方式" value={state.executionMode} disabled={jobActive || state.sending} onChange={event => workspaceStore.setExecutionMode(event.target.value as ExecutionMode)}><option value="auto">自动</option><option value="parallel">并行</option><option value="sequential">顺序</option></select></label>
+                <small>自动由服务端按真实配置选择；前端不假定实际执行方式。</small>
+                <label>其他精选数量 <input aria-label="其他精选论文数量" type="number" min={1} max={15} value={state.topK} disabled={jobActive || state.sending} onChange={event => workspaceStore.setTopK(Number(event.target.value))}/></label>
+                <small>推荐使用 3、5 或 8 篇；旧记录中的其他合法数量仍可保留。</small>
+              </div>
+            </details>
           </>}
           {!state.config?.api_key_configured && <span className="key-needed"><ShieldCheck size={13}/>需配置密钥</span>}</div>
           <div className="send-actions">

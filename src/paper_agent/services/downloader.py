@@ -27,7 +27,11 @@ import pymupdf
 
 from paper_agent.config import Settings
 from paper_agent.models import ErrorInfo, Paper
-from paper_agent.services.pdf_runtime import PDF_PARSE_LOCK
+from paper_agent.services.pdf_runtime import (
+    PDF_PARSE_LOCK,
+    refresh_reading_status,
+    stable_artifact_id,
+)
 from paper_agent.sources.arxiv_source import _REQUEST_GATE
 
 Resolver = Callable[[str, int], Awaitable[Sequence[str]]]
@@ -116,6 +120,17 @@ def _atomic_write(path: Path, data: bytes) -> None:
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _downloaded(result: Paper, path: Path) -> Paper:
+    result.pdf_path = str(path)
+    result.pdf_artifact_id = stable_artifact_id("pdf", result.paper_id)
+    result.acquisition_status = "downloaded"
+    if result.conversion_status is None:
+        result.conversion_status = "not_attempted"
+    result.status, result.error = "downloaded", None
+    refresh_reading_status(result)
+    return result
 
 
 @asynccontextmanager
@@ -305,9 +320,7 @@ class Downloader:
                     )
                     if cached is not None:
                         audit.update(cached, cache_hit=True)
-                        result.pdf_path = str(cache_path)
-                        result.status, result.error = "downloaded", None
-                        return result
+                        return _downloaded(result, cache_path)
                 if not candidates:
                     raise DownloadError("no_open_access", "未找到可公开获取的 PDF 地址。")
                 if self.client is None:
@@ -332,11 +345,23 @@ class Downloader:
             self._record(result, audit, DownloadError("storage_error", "PDF 保存失败。"))
         finally:
             audit["duration_seconds"] = round(time.monotonic() - started, 6)
-        result.pdf_path = None
-        result.status = "no_open_access" if all(
+        preserved_pdf = False
+        if result.pdf_path:
+            preserved_pdf = await asyncio.to_thread(Path(result.pdf_path).is_file)
+        if preserved_pdf:
+            result.pdf_artifact_id = stable_artifact_id("pdf", result.paper_id)
+        else:
+            result.pdf_path = None
+            result.pdf_artifact_id = None
+        unavailable = bool(audit["errors"]) and all(
             error["code"] in {"no_open_access", "access_unavailable"} for error in audit["errors"]
-        ) else "download_failed"
+        )
+        result.acquisition_status = "unavailable" if unavailable else "failed"
+        if result.conversion_status is None:
+            result.conversion_status = "not_attempted"
+        result.status = "no_open_access" if unavailable else "download_failed"
         result.error = audit["errors"][-1]["message"]
+        refresh_reading_status(result)
         return result
 
     async def _candidates(self, result, candidates, client, audit, key, root, deadline):
@@ -364,9 +389,7 @@ class Downloader:
                         json.dumps(manifest, ensure_ascii=False).encode("utf-8"),
                     )
                 audit.update(details)
-                result.pdf_path = str(path)
-                result.status, result.error = "downloaded", None
-                return result
+                return _downloaded(result, path)
             except TimeoutError:
                 if time.monotonic() >= deadline:
                     raise

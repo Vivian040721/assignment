@@ -27,6 +27,10 @@ def test_demo_runs_both_task_agents_and_persists_scopes(tmp_path):
     assert result.metrics["physical_llm_requests"] == 0
     assert result.metrics["online_complete"] is False
     assert result.metrics["processing_complete"] is True
+    assert result.delivery_status == "preliminary_notes"
+    assert result.brief is not None
+    assert not result.brief.findings
+    assert result.brief.report_artifact_id == result.report.report_artifact_id
     trace = [json.loads(line) for line in (Path(result.output_dir) / "trace.jsonl").read_text(encoding="utf-8").splitlines()]
     assert {"selector", "research_summarize", "research_report"} <= {event["stage"] for event in trace}
     assert {timing.stage for timing in result.timings} == {"search", "selection", "fulltexts", "summarize", "report", "total"}

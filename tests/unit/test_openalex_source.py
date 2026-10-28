@@ -81,8 +81,12 @@ def test_metadata_provenance_and_oa_candidates():
     ]
     assert paper.source_records[0]["id"] == "https://openalex.org/W1"
     assert paper.source_records[0]["locations"][0]["source_name"] == "Example Journal"
+    assert paper.metadata["oa_landing_urls"] == [
+        "https://journal.example/article/123", "https://repo.example/123",
+    ]
     assert paper.metadata["pdf_urls_verified"] is False
     assert paper.status == "metadata_only"
+    assert paper.acquisition_status is None
 
 
 def test_missing_fields_are_not_invented():
@@ -149,6 +153,7 @@ def test_oa_url_with_pdf_suffix_is_candidate():
         "is_oa": True, "oa_url": "https://repo.example/paper.PDF?download=1",
     }))
     assert paper.pdf_url == "https://repo.example/paper.PDF?download=1"
+    assert paper.metadata["oa_landing_urls"] == []
 
 
 def test_closed_locations_and_html_pdf_fields_are_excluded():
@@ -189,6 +194,22 @@ def test_unicode_and_reserved_query_are_encoded_and_key_is_header_only():
     assert "secret-test" not in str(seen[0].url)
     assert seen[0].headers["Authorization"] == "Bearer secret-test"
     assert seen[0].extensions["timeout"]["read"] == 30
+
+
+@pytest.mark.parametrize("query,title", [
+    ('title.search:"Agent Memory"', "Agent Memory"),
+    ("title.search:Agent Memory", "Agent Memory"),
+])
+def test_title_search_uses_filter_instead_of_full_text_search(query, title):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"results": []})
+
+    assert run_search(handler, query=query) == []
+    assert seen[0].url.params["filter"] == f'title.search:"{title}"'
+    assert "search" not in seen[0].url.params
 
 
 def test_pagination_keeps_fixed_page_size_and_honors_limit(monkeypatch):
@@ -356,9 +377,11 @@ def test_zero_limit_does_not_request():
 
 def test_owned_client_is_closed(monkeypatch):
     created = []
+    created_kwargs = []
     original_client = httpx.AsyncClient
 
     def factory(**kwargs):
+        created_kwargs.append(kwargs)
         created.append(original_client(
             transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"results": [work()]})),
             **kwargs,
@@ -368,3 +391,4 @@ def test_owned_client_is_closed(monkeypatch):
     monkeypatch.setattr(openalex_source.httpx, "AsyncClient", factory)
     assert len(asyncio.run(search_openalex("memory", 1, settings=settings()))) == 1
     assert created[0].is_closed
+    assert created_kwargs[0]["trust_env"] is False

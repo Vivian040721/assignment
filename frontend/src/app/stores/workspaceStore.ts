@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from 'react';
 import { desktopApi } from '../services/desktopApi';
-import { isReadOnlyConversation, type Action, type Conversation, type ConversationSummary, type Job, type Message, type PublicConfig, type ServiceInfo } from '../types/contracts';
+import { isReadOnlyConversation, type Action, type Conversation, type ConversationSummary, type ExecutionMode, type Job, type Message, type PublicConfig, type ServiceInfo } from '../types/contracts';
 import { isJobActive, isJobFinished } from '../utils/status';
+import { requestedExecutionMode } from '../utils/researchBrief';
 
 type BootStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -16,7 +17,7 @@ export interface WorkspaceState {
   activeJob: Job | null;
   resultJob: Job | null;
   action: Action;
-  executionMode: 'concurrent' | 'sequential';
+  executionMode: ExecutionMode;
   topK: number;
   drafts: Record<string, string>;
   sending: boolean;
@@ -36,7 +37,7 @@ const initialState: WorkspaceState = {
   activeJob: null,
   resultJob: null,
   action: 'research',
-  executionMode: 'concurrent',
+  executionMode: 'auto',
   topK: 5,
   drafts: {},
   sending: false,
@@ -99,7 +100,7 @@ function installConversation(conversation: Conversation, job: Job | null, result
   const failedText = retryTextFor(conversation, job);
   let drafts = state.drafts;
   if (failedText && !drafts[selectedId]) drafts = { ...drafts, [selectedId]: failedText };
-  const completedResearch = Boolean(job && job.action === 'research' && (job.status === 'completed' || job.status === 'partial'));
+  const completedResearch = Boolean(job && job.action === 'research' && isJobFinished(job.status) && (job.result || conversation.result));
   const nextAction: Action = completedResearch || conversation.result ? 'chat' : job?.action ?? state.action;
   publish({
     ...state,
@@ -156,7 +157,7 @@ function applyJob(job: Job): void {
     ...(job.action === 'research' ? { resultJob: merged } : {}),
   };
   if (job.conversation && state.conversationId === job.conversation.conversation_id) next.conversation = job.conversation;
-  if (job.action === 'research' && (job.status === 'completed' || job.status === 'partial')) next.action = 'chat';
+  if (job.action === 'research' && isJobFinished(job.status) && (job.result || state.conversation?.result)) next.action = 'chat';
   if (job.status === 'failed' || job.status === 'cancelled') next.action = job.action ?? state.action;
   update(next);
   restoreRetryDraft(job);
@@ -237,7 +238,7 @@ export const workspaceStore = {
       const failures: string[] = [];
       if (info.status === 'fulfilled') update({ serviceInfo: info.value }); else failures.push(errorMessage(info.reason));
       if (config.status === 'fulfilled') {
-        update({ config: config.value, topK: config.value.default_top_k, executionMode: config.value.default_execution_mode });
+        update({ config: config.value, topK: config.value.default_top_k, executionMode: requestedExecutionMode(config.value.default_execution_mode) });
       } else failures.push(errorMessage(config.reason));
       if (conversations.status === 'fulfilled') updateConversationList(conversations.value); else failures.push(errorMessage(conversations.reason));
       update({ bootStatus: failures.length === outcomes.length ? 'error' : 'ready', error: failures.length ? failures.join('；') : null });
@@ -258,7 +259,7 @@ export const workspaceStore = {
   setAction(action: Action): void {
     update({ action });
   },
-  setExecutionMode(executionMode: 'concurrent' | 'sequential'): void {
+  setExecutionMode(executionMode: ExecutionMode): void {
     update({ executionMode });
   },
   setTopK(topK: number): void {
@@ -281,7 +282,7 @@ export const workspaceStore = {
     update({ notice: null });
   },
   updateConfig(config: PublicConfig): void {
-    update({ config, topK: config.default_top_k, executionMode: config.default_execution_mode, error: null, notice: '设置已保存。保存设置不会启动研究或模型请求。' });
+    update({ config, topK: config.default_top_k, executionMode: requestedExecutionMode(config.default_execution_mode), error: null, notice: '设置已保存。保存设置不会启动研究或模型请求。' });
   },
   newConversation(): void {
     selectionSequence += 1;

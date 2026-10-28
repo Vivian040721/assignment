@@ -2,6 +2,31 @@
 
 All notable changes to Paper Agent are documented here.
 
+## [0.3.0] - 2026-10-28
+
+### Added
+
+- Research briefs with evidence-backed findings, key papers and a research next step, with execution details and additional limitations available on demand.
+- In-app PDF.js reading through the existing allowlisted PDF-byte API, including page navigation, zoom, text search and focused reading.
+
+### Fixed
+
+- Prepared full-text records now take precedence over the original selection when associating papers, summaries and PDF/Markdown artifacts; replacement papers remain available in the brief.
+- Source-bound chunk evidence and bounded paper synthesis retain verified material and preserve incomplete delivery instead of promoting it to full success.
+- Targeted title queries and source handling preserve the real multi-source, Sentence-BERT and LLM-selection workflow.
+
+### Changed
+
+- Python, desktop, renderer and lockfile metadata now use `0.3.0`; API remains v3.
+- Future development uses the permanent `dev` branch with pull requests to `main`, without version-named development branches.
+- Primary reading surfaces prioritize research content and fold technical statuses, scores, repairs and replacement traces into execution records.
+
+### Validation and known limitations
+
+- PDF page rendering, page turns, search and focused reading were observed with real papers before this metadata-only version update.
+- The latest independent research task retrieved 43 unique candidates but produced only one partial-fulltext summary and an invalid-as-complete report. Full-text availability, duplicate findings and finding-to-evidence matching remain unresolved.
+- This version update adds no model calls, controlled comparisons, new test-suite runs, packaging, release tags or deployment. See `docs/v0.3.0-交付说明.md` for checks and scope.
+
 ## [0.2.2] - 2026-10-24
 
 ### Fixed

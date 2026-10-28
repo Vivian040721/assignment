@@ -1,4 +1,8 @@
-# Paper Agent v0.2.2
+# Paper Agent v0.3.0
+
+The permanent development branch is `dev`. Continue future development on
+`dev` and open pull requests to `main`; do not create version-named development
+branches. Application versions are maintained in the package metadata.
 
 Current architecture: Electron + React + TypeScript + Vite is the sole desktop
 UI. Python owns durable jobs, conversations, configuration and MCP execution.

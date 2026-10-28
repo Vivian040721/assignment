@@ -14,8 +14,9 @@ import {
   paperStatusLabel,
   rankingFallbackLabel,
   summaryScopeLabel,
+  summaryStatusLabel,
 } from './labels';
-export { paperStatusLabel, summaryScopeLabel } from './labels';
+export { paperStatusLabel, summaryScopeLabel, summaryStatusLabel } from './labels';
 
 export interface PaperCollection {
   result: PipelineResult | null;
@@ -114,13 +115,40 @@ export function paperIsCompleteFulltext(paper: Paper | undefined): boolean {
   return Boolean(paper && paper.status === 'converted' && paper.fulltext_quality?.complete === true);
 }
 
-export function summaryIsComplete(summary: Summary | undefined): boolean {
-  return Boolean(
-    summary
-    && summary.summary_scope === 'fulltext'
-    && !(summary.errors?.length)
-    && Boolean(summary.overview?.trim() || summary.deep_analysis?.trim()),
+export type SummaryStatus = 'missing' | 'failed' | 'usable_partial' | 'complete' | 'unknown';
+
+export function summaryStatus(summary: Summary | undefined): SummaryStatus {
+  if (!summary) return 'missing';
+  if (summary.summary_scope === 'failed') return 'failed';
+  const hasContent = Boolean(
+    summary.overview?.trim() || summary.deep_analysis?.trim()
+    || summary.research_question?.trim() || summary.core_idea?.trim()
+    || summary.relevance?.trim() || summary.methods?.length || summary.experiments?.length
+    || summary.findings?.length || summary.limitations?.length || summary.author_claims?.length
+    || summary.system_inferences?.length || summary.speculative_ideas?.length
+    || summary.evidence?.length,
   );
+  if (!hasContent) return summary.errors?.length ? 'failed' : 'unknown';
+  const complete = Boolean(
+    summary.summary_scope === 'fulltext'
+    && !(summary.errors?.length)
+    && summary.overview?.trim() && summary.deep_analysis?.trim()
+    && summary.research_question?.trim() && summary.core_idea?.trim()
+    && summary.relevance?.trim() && summary.evidence?.length,
+  );
+  return complete ? 'complete' : 'usable_partial';
+}
+
+export function summaryIsComplete(summary: Summary | undefined): boolean {
+  return summaryStatus(summary) === 'complete';
+}
+
+export function summaryStatusCounts(summaries: Summary[]): Record<SummaryStatus, number> {
+  const counts: Record<SummaryStatus, number> = {
+    missing: 0, failed: 0, usable_partial: 0, complete: 0, unknown: 0,
+  };
+  for (const summary of summaries) counts[summaryStatus(summary)] += 1;
+  return counts;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -247,7 +275,7 @@ export interface PaperStageView {
   detail?: string;
 }
 
-const TERMINAL_RESULT_STATUSES = new Set(['completed', 'demo_completed', 'partial', 'failed', 'cancelled']);
+const TERMINAL_RESULT_STATUSES = new Set(['completed', 'demo_completed', 'partial_success', 'partial', 'failed', 'cancelled']);
 
 export function isTerminalStatus(status?: string): boolean {
   return Boolean(status && TERMINAL_RESULT_STATUSES.has(status));
@@ -290,9 +318,9 @@ export function paperStages(
     ? `LLM 入选名次 #${paper.rank ?? '—'}`
     : replacementAttempt
       ? (replacementAttempt.complete
-        ? '完整全文替补（原始 Top-k 审计保留）'
+        ? '完整全文替补（原始精选论文 审计保留）'
         : replacementAttempt.in_analysis ? '部分全文替补进入分析' : '候补尝试未进入分析')
-      : replacement ? '原始 Top-k 之外的全替补' : analyzed ? '候补进入实际分析' : undefined;
+      : replacement ? '原始精选论文 之外的全替补' : analyzed ? '候补进入实际分析' : undefined;
   const downloadState: StageState = paper.pdf_path ? 'done'
     : attempted ? (terminal ? 'failed' : 'pending') : 'skipped';
   const downloadDetail = paper.pdf_path ? 'PDF 已保存'
@@ -306,12 +334,18 @@ export function paperStages(
     : paper.pdf_path ? (terminal ? (paperReason || '未生成 Markdown') : '等待转换') : '没有可转换的 PDF';
   // Reading scope and validation are separate: a full-text scope with failed
   // chunk/merge checks must not look like a successful full-text summary.
+  const derivedSummaryStatus = summaryStatus(summary);
   const summaryState: StageState = !summary
     ? analyzed ? (terminal ? 'failed' : 'pending') : 'skipped'
-    : summary.summary_scope === 'failed' ? 'failed'
-      : summaryIsComplete(summary) ? 'done' : 'partial';
+    : derivedSummaryStatus === 'failed' ? 'failed'
+      : derivedSummaryStatus === 'complete' ? 'done'
+        : derivedSummaryStatus === 'unknown' ? 'pending' : 'partial';
   const summaryDetail = summary
-    ? [summaryScopeLabel(summary.summary_scope), summaryReason].filter(Boolean).join(' · ')
+    ? [
+      summaryStatusLabel(derivedSummaryStatus),
+      summaryScopeLabel(summary.summary_scope),
+      summaryReason,
+    ].filter(Boolean).join(' · ')
     : analyzed ? (terminal ? (paperReason || '总结未返回') : '等待结果') : '未进入分析';
   const reportReferenced = reportIds.has(paper.paper_id);
   const reportMetricsValid = result?.metrics?.report_valid;
@@ -356,7 +390,7 @@ export function partialReasons(result: PipelineResult | null): PartialReason[] {
     add('limitation', 'ranking_fallback', '语义排序已回退', ranking.fallbackMessage || rankingFallbackLabel(ranking.fallbackReason) || '实际使用关键词排序。');
   }
   if (result.metrics?.selector_degraded) {
-    add('limitation', 'selector_degraded', 'LLM 筛选已降级', 'Top-k 来自配置允许的初始排序；请查看论文选择记录。');
+    add('limitation', 'selector_degraded', 'LLM 筛选已降级', '精选论文 来自配置允许的初始排序；请查看论文选择记录。');
   }
   if (result.metrics?.query_degraded) {
     add('limitation', 'query_degraded', '检索词规划降级', '检索使用了降级词或显式词；请查看活动记录中的 query_plan。');
@@ -365,28 +399,68 @@ export function partialReasons(result: PipelineResult | null): PartialReason[] {
     ? result.metrics.replacements.filter(item => typeof item === 'object' && item !== null)
     : [];
   if (replacements.length) {
-    add('limitation', 'replacements', `${replacements.length} 篇全文替补`, '原始 Top-k 选择未改写；替补对应关系保留在论文列表和 metrics 中。', replacements.length);
+    add('limitation', 'replacements', `${replacements.length} 篇全文替补`, '原始精选论文 选择未改写；替补对应关系保留在论文列表和 metrics 中。', replacements.length);
   }
-  const summaryCounts = new Map<string, number>();
-  for (const summary of result.summaries ?? []) {
-    if (result.status === 'demo_completed' && summary.summary_scope === 'demo_fixture') continue;
-    if (summary.summary_scope !== 'fulltext') {
-      summaryCounts.set(summary.summary_scope, (summaryCounts.get(summary.summary_scope) ?? 0) + 1);
+  const summaries = (result.summaries ?? []).filter(summary =>
+    !(result.status === 'demo_completed' && summary.summary_scope === 'demo_fixture'));
+  const statusCounts = summaryStatusCounts(summaries);
+  const analysisIds = new Set(stringList(result.metrics?.analysis_paper_ids));
+  const summaryIds = new Set(summaries.map(summary => summary.paper_id));
+  const missingFromAnalysis = [...analysisIds].filter(paperId => !summaryIds.has(paperId)).length;
+  const effectiveMissing = result.status === 'demo_completed'
+    ? 0 : Math.max(statusCounts.missing, missingFromAnalysis);
+  if (statusCounts.usable_partial) {
+    const scopes = new Map<string, number>();
+    for (const summary of summaries) {
+      if (summaryStatus(summary) !== 'usable_partial') continue;
+      scopes.set(summary.summary_scope, (scopes.get(summary.summary_scope) ?? 0) + 1);
     }
-  }
-  if (summaryCounts.size) {
-    const detail = [...summaryCounts.entries()].map(([scope, count]) => `${summaryScopeLabel(scope)} ${count} 篇`).join('；');
+    const detail = [...scopes.entries()].map(([scope, count]) => `${summaryScopeLabel(scope)} ${count} 篇`).join('；');
     add(
       completed ? 'limitation' : 'partial',
-      'summary_scope',
-      completed ? '部分论文的非全文总结范围' : '总结范围不完整',
-      `${detail}。未读内容没有被标记为全文。`,
+      'summary_partial',
+      `可用部分总结 ${statusCounts.usable_partial} 篇`,
+      `${detail}。有可用内容，但范围、校验或论文级综合不完整，未计入完整总结。`,
+      statusCounts.usable_partial,
     );
   }
-  const fulltextSummaries = asNumber(result.metrics?.fulltext_summary_count);
+  if (statusCounts.failed) {
+    add(
+      'partial',
+      'summary_failed',
+      `总结失败 ${statusCounts.failed} 篇`,
+      '失败总结没有可用验证内容，不计入部分总结或完整总结。',
+      statusCounts.failed,
+    );
+  }
+  if (effectiveMissing) {
+    add(
+      'partial',
+      'summary_missing',
+      `总结缺失 ${effectiveMissing} 篇`,
+      '这些论文进入分析但没有返回总结产物，未默认标记为部分成功。',
+      effectiveMissing,
+    );
+  }
+  if (statusCounts.unknown) {
+    add(
+      'partial',
+      'summary_unknown',
+      `总结状态未知 ${statusCounts.unknown} 篇`,
+      '旧记录缺少足够字段判断总结是否可用，未默认标记为成功或部分成功。',
+      statusCounts.unknown,
+    );
+  }
+  const fulltextSummaries = asNumber(result.metrics?.complete_summary_count)
+    ?? asNumber(result.metrics?.fulltext_summary_count);
   const topK = result.top_k;
   if (!completed && terminal && typeof fulltextSummaries === 'number' && fulltextSummaries < topK) {
-    add('partial', 'fulltext_summary_count', `全文总结 ${fulltextSummaries}/${topK}`, '只有通过完整全文校验的总结才会计入该数量。');
+    add(
+      'partial',
+      'complete_summary_count',
+      `完整总结 ${fulltextSummaries}/${topK}`,
+      '只有满足全文范围、无校验错误且论文级必需内容完整的总结才会计入。',
+    );
   }
   const errorCodes = new Map<string, { error: ContractError; count: number }>();
   for (const error of result.errors ?? []) {

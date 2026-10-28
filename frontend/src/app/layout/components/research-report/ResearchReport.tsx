@@ -3,11 +3,10 @@ import { ArrowUp, BookOpen, Copy, Download, FileText, FolderOpen } from 'lucide-
 import type { Artifact, ContractError, PipelineResult } from '../../../types/contracts';
 import { desktopApi } from '../../../services/desktopApi';
 import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStore';
-import { statusLabel } from '../../../utils/status';
-import { errorHint, errorLabel, summaryScopeLabel } from '../../../utils/labels';
+import { errorLabel } from '../../../utils/labels';
 import { readableReportMarkdown } from '../../../utils/reportMarkdown';
+import { deliveryStatusFor, deliveryStatusLabels, reportArtifactFor } from '../../../utils/researchBrief';
 import { MarkdownContent } from '../common/MarkdownContent';
-import { TargetCoverageSummary } from '../common/ResultInsights';
 
 export function ResearchReport() {
   const { activeJob, resultJob, conversation } = useWorkspaceState();
@@ -15,7 +14,7 @@ export function ResearchReport() {
   const report = job?.result?.report ?? conversation?.result?.report ?? null;
   const result = job?.result ?? conversation?.result ?? null;
   const artifacts = job?.artifacts ?? [];
-  const reportArtifact = artifacts.find(item => item.kind === 'report' || (item.kind === 'markdown' && item.name.toLowerCase().includes('report')));
+  const reportArtifact = reportArtifactFor(result, artifacts);
   const [markdown, setMarkdown] = useState(report?.markdown ?? '');
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -26,6 +25,7 @@ export function ResearchReport() {
     () => readableReportMarkdown(markdown, report?.comparison),
     [markdown, report?.comparison],
   );
+  const hasSubstance = reportHasSubstance(report, displayMarkdown);
 
   useEffect(() => {
     let current = true;
@@ -97,50 +97,40 @@ export function ResearchReport() {
   if (!report && !reportArtifact) return <div className="panel-empty"><span><FileText size={21}/></span><strong>研究报告尚未生成</strong><p>完成研究任务后，服务端返回的报告会在这里预览。失败和部分结果会按原状态保留。</p></div>;
 
   const reportErrors = collectReportErrors(result, report);
-  const state = reportState(result, report, reportErrors);
-  const validity = reportValidity(result);
+  const state = reportState(result, report, reportErrors, hasSubstance);
   const headings = markdownHeadings(displayMarkdown);
   const references = report?.references ?? [];
   const reportLimitations = (report?.limitations ?? []).filter(item =>
     !item.startsWith('部分报告：') && !item.startsWith('报告提示使用了') &&
     !item.startsWith('报告输入超过') && !item.startsWith('完整总结集'));
-  const scopeCounts = new Map<string, number>();
-  for (const summary of result?.summaries ?? []) {
-    scopeCounts.set(summary.summary_scope, (scopeCounts.get(summary.summary_scope) ?? 0) + 1);
-  }
+  const delivery = deliveryStatusFor(result, job);
   return <article className="report-view">
     <header className="report-header"><div><span className="eyebrow">研究产物</span><h2>{state.title}</h2><p>{job?.idea ?? conversation?.title ?? '当前会话'}</p></div><span className="report-file-mark"><FileText size={17}/></span></header>
-    <div className="report-status-row"><span className={`status-chip status-${state.tone}`}>{state.label}</span>{result && <span className={`status-chip status-${result.status}`}>{statusLabel(result.status)}</span>}{validity && <span className={`status-chip status-${validity.tone}`}>{validity.label}</span>}{references.length > 0 && <span className="report-meta">引用 {references.length} 篇</span>}</div>
+    <div className="report-status-row">{delivery && <span className={`delivery-badge delivery-${delivery}`}>{deliveryStatusLabels[delivery]}</span>}{references.length > 0 && <span className="report-meta">引用 {references.length} 篇</span>}</div>
     <p className={`report-state-note ${state.tone === 'failed' ? 'is-error' : ''}`}>{state.note}</p>
-    {scopeCounts.size > 0 && <div className="report-coverage">
-      {[...scopeCounts.entries()].map(([scope, count]) => <span key={scope}>{summaryScopeLabel(scope)} <strong>{count}</strong></span>)}
-    </div>}
-    {result && <TargetCoverageSummary result={result} compact/>}
     <div className="report-actions">
-      <button className="subtle-button" type="button" disabled={!displayMarkdown} onClick={() => void copyReport()}><Copy size={14}/>复制</button>
+      <button className="subtle-button" type="button" disabled={!displayMarkdown || !hasSubstance} onClick={() => void copyReport()}><Copy size={14}/>复制</button>
       {reportArtifact && <button className="subtle-button" type="button" onClick={() => void exportReport()}><Download size={14}/>导出</button>}
       {reportArtifact && <button className="subtle-button" type="button" onClick={() => void openReport()}><FolderOpen size={14}/>打开文件</button>}
       {displayMarkdown.length > 6000 && <button className="subtle-button" type="button" onClick={scrollToTop}><ArrowUp size={14}/>回到顶部</button>}
       {reportArtifact && <span className="file-name">{reportArtifact.name}</span>}
     </div>
     {exportedPath && <p className="file-confirmation">已导出：{exportedPath}</p>}
-    {headings.length > 1 && <details className="report-outline">
+    {headings.length > 1 && hasSubstance && <details className="report-outline">
       <summary>报告目录（{headings.length}）</summary>
       <ol>{headings.map((heading, index) => <li key={`${index}:${heading.title}`} className={`outline-level-${heading.level}`}>
         <button type="button" onClick={() => scrollToHeading(heading.title)}>{heading.title}</button>
       </li>)}</ol>
     </details>}
-    {reportErrors.length > 0 && <details className="report-errors" open={state.tone === 'failed' || undefined}>
-      <summary>报告错误与校验信息（{reportErrors.length}）</summary>
-      <ul>{reportErrors.map((item, index) => <li key={`${item.stage ?? item.code ?? 'error'}:${index}`}>
-        <strong>{errorLabel(item)}</strong>
-        <span>{errorHint(item.code)}{item.code ? ` · ${item.code}` : ''}{item.stage ? ` · ${item.stage}` : ''}</span>
-      </li>)}</ul>
-    </details>}
     {loading ? <div className="reader-loading" aria-live="polite"><span className="skeleton-line wide"/><span className="skeleton-line"/><span className="skeleton-line medium"/></div>
-      : displayMarkdown ? <div ref={contentRef} className="report-markdown"><MarkdownContent text={displayMarkdown}/></div>
-        : report?.overview ? <div className="report-preview"><h3>报告概述</h3><p>{report.overview}</p>{reportLimitations.length ? <ul>{reportLimitations.map(limitation => <li key={limitation}>{limitation}</li>)}</ul> : null}</div>
-          : <div className="panel-empty compact-empty"><span><BookOpen size={19}/></span><strong>报告正文未随结果返回</strong><p>请检查活动记录中的报告生成状态和服务端错误。</p></div>}
+      : !hasSubstance ? <section className="report-unavailable" role="status">
+        <strong>暂无可读的综合正文</strong>
+        <p>{reportFailureNote(reportErrors, state.note)}</p>
+        <small>原始报告、错误记录、已有引用和真实任务产物仍保留；不会用整套空章节占位。</small>
+      </section>
+        : displayMarkdown ? <div ref={contentRef} className="report-markdown"><MarkdownContent text={displayMarkdown}/></div>
+          : report?.overview ? <div className="report-preview"><h3>报告概述</h3><p>{report.overview}</p>{reportLimitations.length ? <ul>{reportLimitations.map(limitation => <li key={limitation}>{limitation}</li>)}</ul> : null}</div>
+            : <div className="panel-empty compact-empty"><span><BookOpen size={19}/></span><strong>报告正文未随结果返回</strong><p>请检查活动记录中的报告生成状态和服务端错误。</p></div>}
     {truncated && <div className="inline-warning" role="status">报告超过 2 MiB，当前仅显示服务端返回的截断内容。</div>}
     {error && <div className="inline-error" role="alert">报告读取失败：{error}</div>}
   </article>;
@@ -159,20 +149,21 @@ function collectReportErrors(result: PipelineResult | null, report: PipelineResu
   return output;
 }
 
-function reportValidity(result: PipelineResult | null): { label: string; tone: string } | null {
-  const value = result?.metrics?.report_valid;
-  if (typeof value !== 'boolean') return null;
-  return value
-    ? { label: '报告有效', tone: 'completed' }
-    : { label: '报告未通过校验', tone: 'failed' };
-}
-
-function reportState(result: PipelineResult | null, report: PipelineResult['report'], errors: ContractError[]) {
+function reportState(
+  result: PipelineResult | null, report: PipelineResult['report'], errors: ContractError[],
+  hasSubstance = true,
+) {
   const valid = result?.metrics?.report_valid;
   const invalid = errors.some(item => ['invalid_model_output', 'llm_budget', 'llm_failed', 'persist_failed'].includes(item.code ?? ''));
   const partial = errors.some(item => item.code === 'partial_report') || result?.status === 'partial';
   const inputCompacted = errors.some(item => item.code === 'partial_report' && item.details?.reason === 'report_input_compacted')
     || (report?.limitations ?? []).some(item => item.includes('有界摘录'));
+  if (!hasSubstance) {
+    return {
+      label: '无可读报告', tone: 'failed', title: '研究报告未生成',
+      note: '报告生成失败或未通过校验，没有可读的综合正文；已有错误、引用和真实产物仍保留。',
+    };
+  }
   if (invalid) {
     return {
       label: '校验未通过', tone: 'failed', title: '部分研究报告',
@@ -205,6 +196,49 @@ function reportState(result: PipelineResult | null, report: PipelineResult['repo
   };
 }
 
+function reportHasSubstance(
+  report: PipelineResult['report'], markdown: string,
+): boolean {
+  if (report) {
+    const hasFields = Boolean(
+      report.overview?.trim() || report.related_work?.length || report.comparison?.length
+      || report.researched_questions?.length || report.limitations?.length
+      || report.research_directions?.length,
+    );
+    if (hasFields) return true;
+  }
+  return markdownHasSubstance(markdown);
+}
+
+function markdownHasSubstance(markdown: string): boolean {
+  if (!markdown.trim()) return false;
+  let insideReferences = false;
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const heading = /^#{1,6}\s+(.+)$/.exec(line);
+    if (heading) {
+      const title = heading[1];
+      insideReferences = title.includes('参考文献') || title.includes('保留的论文引用');
+      continue;
+    }
+    if (insideReferences) continue;
+    if (line.startsWith('研究想法：') || line.startsWith('>')) continue;
+    if (['未生成。', '未明确报告。', '未在所读材料中明确报告。'].includes(line)) continue;
+    if (line.startsWith('未生成可读的综合正文') || line.startsWith('原因：')) continue;
+    return true;
+  }
+  return false;
+}
+
+function reportFailureNote(errors: ContractError[], fallback: string): string {
+  const primary = errors.find(item =>
+    ['invalid_model_output', 'llm_budget', 'llm_failed', 'persist_failed', 'no_summaries'].includes(item.code ?? ''),
+  ) ?? errors[0];
+  if (!primary) return fallback || '报告生成失败或没有可读正文；请查看错误与真实产物。';
+  return errorLabel(primary);
+}
+
 function markdownHeadings(markdown: string): Array<{ level: number; title: string }> {
   const output: Array<{ level: number; title: string }> = [];
   for (const match of markdown.matchAll(/^(#{2,3})\s+(.+)$/gm)) {
@@ -217,5 +251,5 @@ function markdownHeadings(markdown: string): Array<{ level: number; title: strin
 }
 
 export function artifactForReport(artifacts: Artifact[]): Artifact | undefined {
-  return artifacts.find(item => item.kind === 'report') ?? artifacts.find(item => item.kind === 'markdown' && item.name.toLowerCase().includes('report'));
+  return reportArtifactFor(undefined, artifacts);
 }

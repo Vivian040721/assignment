@@ -32,21 +32,27 @@ from paper_agent.api_bridge import (
     artifact_location,
     artifact_text,
     redact_secrets,
+    resolve_artifact,
 )
 from paper_agent.config import Settings
 from paper_agent.conversations import ConversationStore, discussion_messages
 from paper_agent.llm_client import ChatClient, LLMError, LLMOutputError
-from paper_agent.models import PipelineResult
+from paper_agent.models import DeliveryStatus, Paper, PipelineResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
-ACTIVE = {"queued", "running"}
+ACTIVE = {"pending", "queued", "running"}
+EXECUTION_REQUESTS = {"auto", "parallel", "sequential", "concurrent"}
 SAFE_ID = re.compile(r"[0-9a-f]{32}\Z")
 RUN_ID = re.compile(r"run_id=([0-9a-f]{32})")
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _missing_paper_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -87,12 +93,14 @@ class UIError(Exception):
 
 class Workbench:
     def __init__(self, settings: Settings, *, root: Path | None = None,
-                 config_path: Path | None = None, research_runner=None):
+                 config_path: Path | None = None, research_runner=None,
+                 private_secrets: tuple[str, ...] = ()):
         self.base = settings
         self.root = (root or settings.data_dir.resolve() / "web").resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.config_path = config_path or self.root / "config.json"
         self.research_runner = research_runner
+        self.private_secrets = private_secrets
         self.preferences = read_json(self.config_path) if self.config_path.is_file() else {}
         self.sessions: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
@@ -117,11 +125,20 @@ class Workbench:
                 if not SAFE_ID.fullmatch(job["job_id"]) or job["session_id"] not in self.sessions:
                     continue
                 self.jobs[job["job_id"]] = job
+                self._restore_loaded_artifacts(job)
                 if job["status"] in ACTIVE:
                     # Restart never retries billable work without a new user action.
                     job["status"] = "failed"
                     job["error"] = "服务已重启，任务已中断。已有资料保留，请重新提交以继续研究。"
-                    self.event(job, "error", message=job["error"])
+                    if job.get("requested_execution_mode") in {"auto", "parallel", "sequential"}:
+                        try:
+                            result = job.get("result")
+                            run = PipelineResult.model_validate(result) if isinstance(result, dict) else None
+                            self._finalize_terminal_result(job, run, self._job_settings(job), "failed")
+                        except Exception:
+                            job["delivery_status"] = None
+                    self.event(job, "error", message=job["error"],
+                               data={"status": "failed", "delivery_status": job.get("delivery_status")})
             except (OSError, ValueError, KeyError, TypeError):
                 continue
 
@@ -153,7 +170,7 @@ class Workbench:
             "openalex_api_key_configured": bool(settings.openalex_api_key),
             "thinking_enabled": settings.llm_thinking_enabled, "http_proxy": settings.http_proxy,
             "default_mode": "live", "default_top_k": settings.top_k,
-            "default_execution_mode": "concurrent",
+            "default_execution_mode": "auto",
             "concurrency": settings.concurrency, "llm_timeout": settings.llm_timeout,
             "http_timeout": settings.http_timeout,
         }
@@ -245,6 +262,19 @@ class Workbench:
 
     def public_job(self, job: dict) -> dict:
         value = {key: value for key, value in job.items() if not key.startswith("_")}
+        value.setdefault("delivery_status", None)
+        result = value.get("result")
+        if job.get("status") in ACTIVE:
+            # An intermediate pipeline snapshot is not a final delivery decision.
+            value["delivery_status"] = None
+            if isinstance(result, dict) and result.get("delivery_status") is not None:
+                value["result"] = result | {"delivery_status": None}
+        elif value["delivery_status"] is None and isinstance(result, dict):
+            # Some early v3 records saved the authoritative classification only
+            # on PipelineResult. Copy that value; never derive it from Job.status.
+            delivery = result.get("delivery_status")
+            if delivery in {"result", "preliminary_notes", "no_result"}:
+                value["delivery_status"] = delivery
         if job.get("conversation_id") in self.conversations.items:
             value["conversation"] = self.load_conversation(job["conversation_id"])
         else:
@@ -255,7 +285,9 @@ class Workbench:
 
     def _secret_values(self) -> tuple[str, ...]:
         settings = self.settings()
-        return tuple(secret for secret in (settings.llm_api_key, settings.openalex_api_key) if secret)
+        return tuple(secret for secret in (
+            *self.private_secrets, settings.llm_api_key, settings.openalex_api_key,
+        ) if secret)
 
     def _redact_public(self, value):
         return redact_secrets(value, self._secret_values())
@@ -267,6 +299,34 @@ class Workbench:
     @staticmethod
     def _legacy_message_id(job_id: str, kind: str) -> str:
         return hashlib.sha256(("paper-agent:legacy-message:" + job_id + ":" + kind).encode()).hexdigest()[:32]
+
+    @staticmethod
+    def _research_message(result: dict) -> str:
+        brief = result.get("brief")
+        if isinstance(brief, dict):
+            findings = [item.get("statement", "") for item in brief.get("findings", [])
+                        if isinstance(item, dict) and item.get("statement")]
+            content = "\n".join(f"{index}. {statement}" for index, statement in enumerate(findings, 1))
+            next_step = brief.get("next_step") or {}
+            if isinstance(next_step, dict) and next_step.get("action"):
+                content += ("\n\n" if content else "") + "推荐下一步：" + next_step["action"]
+            if not content:
+                content = "本次未形成可靠研究结论，请查看研究限制与执行记录。"
+            if brief.get("report_artifact_id"):
+                content += "\n\n完整报告请通过研究结果中的报告入口阅读。"
+            if result.get("mode") == "demo":
+                content = "【Demo 合成示例】\n\n" + content
+            return content
+        # Legacy records did not persist a brief. Keep their historical report
+        # readable instead of destructively migrating or hiding the old content.
+        report = result.get("report") or {}
+        content = report.get("markdown") or report.get("overview")
+        if not content:
+            content = (f"研究已结束，已选择 {len(result.get('selected_papers', []))} 篇论文。"
+                       "请查看资料与执行记录。")
+        if result.get("mode") == "demo":
+            content = "【Demo 合成示例】\n\n" + content
+        return content
 
     def _legacy_conversation_for_job(self, job: dict) -> dict | None:
         if job.get("conversation_id") or not isinstance(job.get("job_id"), str):
@@ -285,13 +345,7 @@ class Workbench:
             content = job["assistant_text"]
             role, kind = "assistant", "chat"
         elif isinstance(result, dict):
-            report = result.get("report") or {}
-            content = report.get("markdown") or report.get("overview")
-            if not content:
-                content = (f"研究已结束，已选择 {len(result.get('selected_papers', []))} 篇论文。"
-                           "请查看资料与执行记录。")
-            if result.get("mode") == "demo":
-                content = "【Demo 合成示例】\n\n" + content
+            content = self._research_message(result)
             role, kind = "assistant", "research"
         else:
             content, role, kind = "", "assistant", "research"
@@ -301,7 +355,7 @@ class Workbench:
                 "role": role, "content": content, "kind": kind, "status": status,
                 "created_at": job.get("updated_at", ""), "job_id": job["job_id"],
             })
-        if status in {"failed", "cancelled", "partial"}:
+        if status in {"failed", "cancelled", "partial", "partial_success"}:
             messages.append({
                 "id": self._legacy_message_id(job["job_id"], "status"),
                 "role": "status", "content": job.get("error") or "任务已结束，请查看执行记录。",
@@ -357,23 +411,26 @@ class Workbench:
                 self.conversations.append(item, "assistant", job["assistant_text"],
                                           job_id=job["job_id"], key=job["job_id"] + ":answer")
             elif action == "research" and job.get("result"):
-                result = job["result"]
-                report = result.get("report") or {}
-                content = report.get("markdown") or report.get("overview")
-                if not content:
-                    content = f"研究已结束，已选择 {len(result.get('selected_papers', []))} 篇论文。请查看资料与执行记录。"
-                if result.get("mode") == "demo":
-                    content = "【Demo 合成示例】\n\n" + content
+                content = self._research_message(job["result"])
                 self.conversations.append(item, "assistant", content, kind="research",
                                           status=job["status"], job_id=job["job_id"],
                                           key=job["job_id"] + ":answer")
-            if job["status"] in {"failed", "cancelled", "partial"}:
+            if job["status"] in {"failed", "cancelled", "partial", "partial_success"}:
                 content = job.get("error") or {"cancelled": "任务已停止，已有资料已保留。",
-                                               "partial": "部分研究步骤未完成，请查看执行记录。"}.get(
+                                               "partial": "部分研究步骤未完成，请查看执行记录。",
+                                               "partial_success": "部分研究步骤未完成，请查看执行记录。"}.get(
                                                    job["status"], "任务未能完成，请查看执行记录。")
                 self.conversations.append(item, "status", content, kind="status", status=job["status"],
                                           job_id=job["job_id"], key=job["job_id"] + ":terminal")
         self.conversations.persist(item)
+
+    @staticmethod
+    def _execution_modes(requested: str, settings: Settings) -> tuple[str, str]:
+        """Return the frozen public request and the actual internal mode."""
+        canonical = "parallel" if requested == "concurrent" else requested
+        if canonical == "auto":
+            return canonical, settings.execution_mode
+        return canonical, "sequential" if canonical == "sequential" else "concurrent"
 
     def submit_message(self, values: dict) -> dict:
         text, action = values.get("text", ""), values.get("action", "research")
@@ -407,14 +464,14 @@ class Workbench:
         submit_values = {"idea": text.strip(), "query": values.get("query", ""),
                          "top_k": values.get("top_k", settings.top_k),
                          "mode": values.get("mode", "live"),
-                         "execution_mode": values.get("execution_mode", "concurrent")}
+                         "execution_mode": values.get("execution_mode", "auto")}
         try:
             if action == "chat":
                 if (not isinstance(submit_values["query"], str) or len(submit_values["query"]) > 1000
                         or isinstance(submit_values["top_k"], bool)
                         or not isinstance(submit_values["top_k"], int)
                         or not 1 <= submit_values["top_k"] <= 15
-                        or submit_values["execution_mode"] not in ("sequential", "concurrent")
+                        or submit_values["execution_mode"] not in EXECUTION_REQUESTS
                         or submit_values["mode"] not in ("live", "demo")):
                     raise UIError("讨论请求的研究选项格式不正确。")
             if action == "research":
@@ -422,8 +479,11 @@ class Workbench:
                 job = self.jobs[job_value["job_id"]]
             else:
                 stamp, job_id = now(), uuid4().hex
+                requested, resolved = self._execution_modes(submit_values["execution_mode"], settings)
                 job = submit_values | {"job_id": job_id, "session_id": session["session_id"],
-                    "status": "queued", "created_at": stamp, "updated_at": stamp,
+                    "status": "pending", "delivery_status": None,
+                    "requested_execution_mode": requested, "execution_mode": resolved,
+                    "created_at": stamp, "updated_at": stamp,
                     "mode": "live", "result": None, "run_id": None,
                     "events": [], "error": None, "artifacts": [], "_event_seq": 0}
                 self.jobs[job_id] = job
@@ -524,17 +584,19 @@ class Workbench:
             raise UIError("这个会话还有任务在运行，请先等待完成或停止任务。", 409)
         idea, query = values.get("idea", ""), values.get("query", "")
         top_k, mode = values.get("top_k", 5), values.get("mode", "live")
-        execution = values.get("execution_mode", "concurrent")
+        execution = values.get("execution_mode", "auto")
         if not isinstance(idea, str) or not 3 <= len(idea.strip()) <= 12000:
             raise UIError("请输入 3 至 12000 字的研究问题。")
         if not isinstance(query, str) or len(query) > 1000:
             raise UIError("英文检索词需要在 1000 字以内。")
         if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 15:
             raise UIError("论文数量需要在 1 到 15 之间。")
-        if mode not in {"live", "demo"} or execution not in {"sequential", "concurrent"}:
+        if mode not in {"live", "demo"} or execution not in EXECUTION_REQUESTS:
             raise UIError("运行模式不正确。")
-        settings = replace(self.settings(), mode=mode,
-                           processing="serial" if execution == "sequential" else "concurrent")
+        base_settings = self.settings()
+        requested, resolved = self._execution_modes(execution, base_settings)
+        settings = replace(base_settings, mode=mode,
+                           processing="serial" if resolved == "sequential" else "concurrent")
         settings.validate()
         if top_k > settings.candidate_limit:
             raise UIError("论文数量超过当前候选上限，请调低 Top-k。")
@@ -544,7 +606,8 @@ class Workbench:
         # New web jobs have their own output root; existing CLI runs stay untouched.
         settings = replace(settings, output_dir=self.root / "runs" / job_id)
         job = {"job_id": job_id, "session_id": session_id, "idea": idea.strip(), "query": query.strip(),
-               "top_k": top_k, "mode": mode, "execution_mode": execution, "status": "queued",
+               "top_k": top_k, "mode": mode, "execution_mode": resolved,
+               "requested_execution_mode": requested, "status": "pending", "delivery_status": None,
                "created_at": timestamp, "updated_at": timestamp, "run_id": None,
                "result": None, "events": [], "error": None, "artifacts": [],
                "_output_dir": str(settings.output_dir.resolve()), "_event_seq": 0}
@@ -552,7 +615,7 @@ class Workbench:
         session["job_ids"].append(job_id)
         if len(session["job_ids"]) == 1 and session["title"] == "新研究":
             session["title"] = idea.strip()[:36]
-        self.event(job, "status", message="研究任务已加入队列。", data={"status": "queued"})
+        self.event(job, "status", message="研究任务已加入队列。", data={"status": "pending"})
         self.tasks[job_id] = asyncio.create_task(self._execute(job, settings))
         return self.public_job(job)
 
@@ -566,16 +629,66 @@ class Workbench:
         return value
 
     @staticmethod
+    def _material_papers(run: PipelineResult) -> dict[str, Paper]:
+        """Merge prepared candidates with the original selection audit by stable ID.
+
+        Prepared papers own file and reading state. The original selection remains
+        the source for selection/ranking metadata when the prepared record lacks it.
+        """
+        merged = {paper.paper_id: paper.model_copy(deep=True) for paper in run.papers}
+        prepared_fields = (
+            "pdf_path", "markdown_path", "pdf_artifact_id", "markdown_artifact_id",
+            "page_map", "fulltext_quality", "acquisition_status", "conversion_status",
+            "reading_status",
+        )
+        selection_fields = (
+            "title", "authors", "year", "abstract", "doi", "arxiv_id", "arxiv_version",
+            "sources", "source_records", "paper_url", "pdf_url", "pdf_urls", "citation_count",
+            "initial_score", "final_score", "rank", "selection_reason", "ranking_reason",
+            "ranking_details",
+        )
+        for selected in run.selected_papers:
+            current = merged.get(selected.paper_id)
+            if current is None:
+                merged[selected.paper_id] = selected.model_copy(deep=True)
+                continue
+            for field in prepared_fields:
+                if _missing_paper_value(getattr(current, field, None)) and not _missing_paper_value(getattr(selected, field, None)):
+                    setattr(current, field, getattr(selected, field))
+            for field in selection_fields:
+                if _missing_paper_value(getattr(current, field, None)) and not _missing_paper_value(getattr(selected, field, None)):
+                    setattr(current, field, getattr(selected, field))
+        return merged
+
+    @staticmethod
     def _artifact_name(label: str, suffix: str) -> str:
         base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", label).strip(" .")[:140]
         return (base or "artifact") + suffix
+
+    @staticmethod
+    def _apply_artifact_ids(run: PipelineResult, artifacts: list[dict]) -> None:
+        identifiers = {(item["kind"], item.get("paper_id")): item["artifact_id"]
+                       for item in artifacts}
+        if run.report is not None:
+            run.report.report_artifact_id = identifiers.get(("report", None))
+        for summary in run.summaries:
+            summary.summary_artifact_id = identifiers.get(("summary", summary.paper_id))
+        for paper in [*run.papers, *run.selected_papers]:
+            paper.pdf_artifact_id = identifiers.get(("pdf", paper.paper_id))
+            paper.markdown_artifact_id = identifiers.get(("markdown", paper.paper_id))
+        evidence = [reference for summary in run.summaries for reference in summary.evidence]
+        if run.brief is not None:
+            evidence.extend(reference for finding in run.brief.findings for reference in finding.evidence)
+        for reference in evidence:
+            reference.pdf_artifact_id = identifiers.get(("pdf", reference.paper_id))
+            reference.markdown_artifact_id = identifiers.get(("markdown", reference.paper_id))
 
     def _artifacts(self, job: dict, run: PipelineResult, settings: Settings) -> None:
         from hashlib import sha256
 
         roots = [Path(path).resolve() for path in (
             settings.data_dir, settings.output_dir, settings.pdf_dir, settings.markdown_dir,
-            settings.summaries_dir, settings.reports_dir,
+            settings.summaries_dir, settings.reports_dir, run.output_dir,
         ) if path]
         candidates = []
         if run.report and run.report.report_path:
@@ -585,7 +698,20 @@ class Workbench:
                 candidates.append(("summary", self._artifact_name(
                     (summary.title or summary.paper_id) + "_总结", ".md"),
                     summary.paper_id, summary.summary_path))
-        for paper in run.papers:
+                summary_path = Path(summary.summary_path)
+                for suffix, kind, label in (
+                    (".chunks.json", "chunks", "_分块证据.json"),
+                    (".audit.json", "audit", "_总结审计.json"),
+                ):
+                    trace_path = summary_path.with_name(summary_path.stem + suffix)
+                    if trace_path.is_file():
+                        candidates.append((kind, self._artifact_name(
+                            (summary.title or summary.paper_id) + label, ""),
+                            summary.paper_id, str(trace_path)))
+        # Prepared papers carry the actual post-download/conversion state; the
+        # original selection is audit metadata. Merge by stable paper_id so an
+        # unenriched selection record cannot erase a registered PDF or Markdown.
+        for paper in self._material_papers(run).values():
             for kind, suffix, path in (("pdf", ".pdf", paper.pdf_path),
                                        ("markdown", ".md", paper.markdown_path)):
                 if path:
@@ -593,17 +719,105 @@ class Workbench:
                                        paper.paper_id, path))
         if run.output_dir:
             candidates.append(("run", "run.json", None, str(Path(run.output_dir) / "run.json")))
-        artifacts, paths = [], {}
+        artifacts, paths, seen = [], {}, set()
         for kind, name, paper_id, filename in candidates:
             path = Path(filename).resolve()
             if not path.is_file() or not any(path.is_relative_to(root) for root in roots):
                 continue
             artifact_id = sha256(f"{kind}:{paper_id or 'report'}".encode()).hexdigest()[:20]
+            if artifact_id in seen:
+                continue
+            seen.add(artifact_id)
             url = f"/api/jobs/{job['job_id']}/artifacts/{artifact_id}"
             artifacts.append({"artifact_id": artifact_id, "name": name, "kind": kind,
                               "paper_id": paper_id, "url": url, "download_url": url + "?download=1"})
             paths[artifact_id] = str(path)
         job["artifacts"], job["_artifact_paths"], job["_artifact_roots"] = artifacts, paths, [str(r) for r in roots]
+        self._apply_artifact_ids(run, artifacts)
+
+    def _job_settings(self, job: dict) -> Settings:
+        output_dir = job.get("_output_dir")
+        return replace(
+            self.settings(), mode=job.get("mode", "live"),
+            processing="serial" if job.get("execution_mode") == "sequential" else "concurrent",
+            output_dir=Path(output_dir) if isinstance(output_dir, str) and output_dir else self.settings().output_dir,
+        )
+
+    def _refresh_brief(self, job: dict, run: PipelineResult) -> DeliveryStatus:
+        """Rebuild the display brief from every real analysis material.
+
+        This is a derived view only: it does not change execution status, source
+        run files, or promote partial evidence to a formal result.
+        """
+        from paper_agent.agents.research_agent import build_research_brief
+
+        brief, delivery_status = build_research_brief(
+            papers=list(self._material_papers(run).values()),
+            summaries=run.summaries,
+            report=run.report,
+        )
+        run.brief = brief
+        self._apply_artifact_ids(run, job.get("artifacts", []))
+        registered_report = next((item["artifact_id"] for item in job.get("artifacts", [])
+                                  if item["kind"] == "report"), None)
+        if run.report is not None:
+            run.report.report_artifact_id = registered_report
+        brief.report_artifact_id = registered_report if run.report is not None else None
+        return delivery_status
+
+    def _finalize_terminal_result(self, job: dict, run: PipelineResult | None,
+                                  settings: Settings, execution_status: str) -> PipelineResult:
+        if run is None:
+            run = PipelineResult(
+                run_id=job.get("run_id") or job["job_id"], idea=job["idea"],
+                query=job.get("query", ""), top_k=job.get("top_k", 5),
+                mode=job.get("mode", "live"), output_dir=job.get("_output_dir"),
+            )
+        run.status = execution_status
+        run.execution_mode = job.get("execution_mode", settings.execution_mode)
+        requested = job.get("requested_execution_mode")
+        if requested in {"auto", "parallel", "sequential"}:
+            run.requested_execution_mode = requested
+        self._artifacts(job, run, settings)
+
+        # Agent 7 is the sole authority for evidence-based delivery classification.
+        delivery_status = self._refresh_brief(job, run)
+        run.delivery_status = delivery_status
+        job["delivery_status"] = delivery_status
+        job["result"] = self._public_result(run)
+        return run
+
+    @staticmethod
+    def _terminal_message(execution_status: str, delivery_status: DeliveryStatus | None) -> str | None:
+        if execution_status == "cancelled":
+            return "任务已停止，已有资料已保留。"
+        if delivery_status == "no_result":
+            return "本次未形成可靠研究结果，请查看研究限制、推荐下一步和执行记录。"
+        if delivery_status == "preliminary_notes":
+            return "当前交付为初步研究笔记，证据或覆盖仍有缺口，请结合限制说明阅读。"
+        if execution_status == "failed":
+            return "研究未能完成，已有资料和执行记录已保留。"
+        if execution_status == "partial_success":
+            return "部分研究步骤未完成，请查看研究限制与执行记录。"
+        return None
+
+    def _restore_loaded_artifacts(self, job: dict) -> None:
+        result = job.get("result")
+        if not isinstance(result, dict):
+            return
+        try:
+            run = PipelineResult.model_validate(result)
+            self._artifacts(job, run, self._job_settings(job))
+            if job.get("status") not in ACTIVE:
+                self._refresh_brief(job, run)
+            job["result"] = self._public_result(run)
+            if job.get("status") not in ACTIVE and job.get("delivery_status") is None:
+                # Copy an existing authoritative value only; legacy completed
+                # jobs without one deliberately remain unclassified.
+                job["delivery_status"] = run.delivery_status
+        except (OSError, ValueError, TypeError, RuntimeError):
+            # A damaged or unavailable old artifact must not hide the whole job.
+            pass
 
     async def _sync_run(self, job: dict, settings: Settings) -> None:
         directory = settings.output_dir
@@ -642,9 +856,11 @@ class Workbench:
             except ValueError:
                 break
             message = item.get("message") if isinstance(item.get("message"), str) else ""
-            self.event(job, "trace", stage=item.get("stage", ""), message=message, data=item)
+            # Persist the cursor in the same job snapshot as the event. A restart
+            # therefore cannot replay an already committed trace line.
             count += 1
-        job["_trace_lines"] = count
+            job["_trace_lines"] = count
+            self.event(job, "trace", stage=item.get("stage", ""), message=message, data=item)
 
     async def _watch(self, job: dict, settings: Settings) -> None:
         while True:
@@ -654,6 +870,7 @@ class Workbench:
     async def _execute(self, job: dict, settings: Settings) -> None:
         watcher = None
         final: str | None = None
+        completed_run: PipelineResult | None = None
 
         def safe_event(kind: str, *, message: str = "", data=None) -> None:
             # Progress and error events must never abort a paid run or mask its
@@ -680,31 +897,29 @@ class Workbench:
                         raw = await run_research(job["idea"], settings, job["top_k"], job["query"], progress)
                     else:
                         raw = await self.research_runner(job, settings, progress)
-                run = PipelineResult.model_validate(raw)
-                job["run_id"], job["result"] = run.run_id, self._public_result(run)
-                self._artifacts(job, run, settings)
-                final = "completed" if run.status in {"completed", "demo_completed"} else run.status
-                if final not in {"completed", "partial", "failed"}:
-                    final = "partial"
-                if final == "failed":
-                    job["error"] = "研究未能完成，请查看任务记录中的失败原因。"
+                completed_run = PipelineResult.model_validate(raw)
+                job["run_id"] = completed_run.run_id
+                final = ("completed" if completed_run.status in {"completed", "demo_completed"}
+                         else "partial_success" if completed_run.status in {"partial", "partial_success"}
+                         else completed_run.status)
+                if final not in {"completed", "partial_success", "failed", "cancelled"}:
+                    final = "partial_success"
         except asyncio.CancelledError:
             final = "cancelled"
-            job["error"] = None
-            safe_event("status", message="任务已停止，已有资料已保留。", data={"status": "cancelled"})
         except TimeoutError:
-            final, job["error"] = "failed", "任务超过两小时，已停止并保留已有资料。"
-            safe_event("error", message=job["error"])
+            final = "failed"
+            safe_event("error", message="任务超过两小时，已停止并保留已有资料。",
+                       data={"exception_type": "TimeoutError"})
         except LLMError as error:
             final = "failed"
-            # ChatClient errors omit provider response bodies and credentials.
-            job["error"] = "模型请求未能完成：" + str(error)
-            safe_event("error", message=job["error"])
+            # Provider details stay in the execution record. ChatClient errors
+            # omit response bodies and credentials by contract.
+            safe_event("error", message="模型请求未能完成：" + str(error),
+                       data={"exception_type": type(error).__name__})
         except Exception as error:
             final = "failed"
-            job["error"] = ("模型或研究服务未能完成任务。请检查密钥、模型名称和网络设置，"
-                            "已有资料仍可查看。错误类型：" + type(error).__name__)
-            safe_event("error", message=job["error"])
+            safe_event("error", message="模型或研究服务未能完成任务，已有资料仍可查看。",
+                       data={"exception_type": type(error).__name__})
         finally:
             try:
                 if watcher:
@@ -715,13 +930,31 @@ class Workbench:
                         await watcher
                 with suppress(Exception):
                     await self._sync_run(job, settings)
-                # The terminal status becomes visible only after every trace event
-                # has been collected, so a polling client can never miss the log.
+                # Finalize after the last snapshot sync so a run.json without the
+                # new fields cannot overwrite the brief or delivery classification.
                 if final is not None:
+                    try:
+                        run = completed_run
+                        if run is None and isinstance(job.get("result"), dict):
+                            run = PipelineResult.model_validate(job["result"])
+                        run = self._finalize_terminal_result(job, run, settings, final)
+                        job["error"] = (None if final == "cancelled" else
+                                        self._terminal_message(final, run.delivery_status))
+                        safe_event("execution_record", message=job.get("error") or "研究执行记录已保存。",
+                                   data={"status": final, "delivery_status": run.delivery_status,
+                                         "errors": [error.model_dump(mode="json") for error in run.errors]})
+                    except Exception as error:
+                        # A contract-integration failure remains explicit; never
+                        # invent a delivery status to make the job look complete.
+                        job["delivery_status"] = None
+                        job["error"] = "研究结果整理失败，请查看执行记录并保留现有资料。"
+                        safe_event("error", message=job["error"],
+                                   data={"exception_type": type(error).__name__})
                     job["status"] = final
                 # Clients read the in-memory status set above; an unwritable disk
                 # reconciles the stale snapshot on the next service start.
-                safe_event("status", message="任务状态已更新。", data={"status": job["status"]})
+                safe_event("status", message=job.get("error") or "任务状态已更新。",
+                           data={"status": job["status"], "delivery_status": job.get("delivery_status")})
             finally:
                 # A persistence failure must not leak the task slot and block
                 # every later submission with "已有任务运行中".
@@ -851,7 +1084,8 @@ async def events_endpoint(request: Request) -> Response:
                     last = event["seq"]
             if job["status"] not in ACTIVE:
                 value = json.dumps(manager._redact_public(
-                    {"job_id": job["job_id"], "status": job["status"]}), ensure_ascii=False)
+                    {"job_id": job["job_id"], "status": job["status"],
+                     "delivery_status": job.get("delivery_status")}), ensure_ascii=False)
                 yield f"event: done\ndata: {value}\n\n"
                 break
             if time.monotonic() - heartbeat >= 15:
@@ -886,15 +1120,10 @@ async def artifact_location_endpoint(request: Request) -> Response:
 async def artifact_endpoint(request: Request) -> Response:
     manager = state(request)
     job = manager.get_job(request.path_params["job_id"])
-    artifact_id = request.path_params["artifact_id"]
-    item = next((item for item in job["artifacts"] if item["artifact_id"] == artifact_id), None)
-    filename = job.get("_artifact_paths", {}).get(artifact_id)
-    if not item or not filename:
-        raise UIError("文件不存在或尚未生成。", 404)
-    path = Path(filename).resolve()
-    roots = [Path(root).resolve() for root in job.get("_artifact_roots", [])]
-    if not path.is_file() or not any(path.is_relative_to(root) for root in roots):
-        raise UIError("文件不存在或已移走。", 404)
+    try:
+        item, path = resolve_artifact(job, request.path_params["artifact_id"])
+    except ArtifactAccessError as error:
+        raise UIError(error.message, error.status) from None
     media = {"pdf": "application/pdf", "run": "application/json"}.get(item["kind"], "text/plain")
     download = request.query_params.get("download") == "1"
     return FileResponse(path, media_type=media, filename=item["name"] if download else None,

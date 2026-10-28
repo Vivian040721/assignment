@@ -78,6 +78,20 @@ test('v0.2.2 input limits match the backend contract', () => {
   assert.throws(() => validators.validateConfigUpdate({ concurrency: 9 }));
 });
 
+test('execution modes accept the frozen request contract and legacy concurrent alias', () => {
+  for (const execution_mode of ['auto', 'parallel', 'sequential', 'concurrent']) {
+    assert.equal(validators.validateSendMessage({
+      text: 'question', action: 'research', execution_mode,
+    }).execution_mode, execution_mode);
+  }
+  assert.throws(() => validators.validateSendMessage({
+    text: 'question', action: 'research', execution_mode: 'turbo',
+  }), /执行模式/);
+  assert.throws(() => validators.validateSendMessage({
+    text: 'question', action: 'research', execution_mode: null,
+  }), /执行模式/);
+});
+
 test('SSE errors preserve the backend message and are bounded', () => {
   const long = '服务端错误'.repeat(100);
   assert.equal(validators.validateJobEvent({ job_id: 'job_1', error: long }, 'job_1').error.length, 300);
@@ -123,12 +137,16 @@ test('public config and service info reject missing or mistyped fields', () => {
     http_proxy: '', default_top_k: 5, default_execution_mode: 'concurrent', concurrency: 4,
     llm_timeout: 60, http_timeout: 30 };
   assert.equal(validators.validatePublicConfig(config).default_top_k, 5);
+  for (const default_execution_mode of ['auto', 'parallel', 'sequential', 'concurrent']) {
+    assert.equal(validators.validatePublicConfig({ ...config, default_execution_mode }).default_execution_mode,
+      default_execution_mode);
+  }
   const { default_top_k: _ignored, ...missingTopK } = config;
   assert.throws(() => validators.validatePublicConfig(missingTopK));
   assert.throws(() => validators.validatePublicConfig({ ...config, default_execution_mode: 'turbo' }));
-  const info = { version: '0.2.2', api_version: 3, pid: 12, active_jobs: 0,
+  const info = { version: '0.3.0', api_version: 3, pid: 12, active_jobs: 0,
     data_root: 'C:\\data', config_path: 'C:\\data\\config.json' };
-  assert.equal(validators.validateServiceInfo(info).version, '0.2.2');
+  assert.equal(validators.validateServiceInfo(info).version, '0.3.0');
   assert.throws(() => validators.validateServiceInfo({ ...info, pid: 0 }));
   assert.throws(() => validators.validateServiceInfo({ ...info, active_jobs: -1 }));
   assert.throws(() => validators.validateServiceInfo({ ...info, data_root: 42 }));

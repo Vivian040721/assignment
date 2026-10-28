@@ -48,10 +48,35 @@
     },
     "EvidenceReference": {
       "additionalProperties": false,
+      "description": "A claim locator; PDF pages are one-based physical pages, not printed labels.",
       "properties": {
         "paper_id": {
           "title": "Paper Id",
           "type": "string"
+        },
+        "pdf_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pdf Artifact Id"
+        },
+        "markdown_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Markdown Artifact Id"
         },
         "page_number": {
           "anyOf": [
@@ -65,6 +90,18 @@
           ],
           "default": null,
           "title": "Page Number"
+        },
+        "page_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Label"
         },
         "section": {
           "anyOf": [
@@ -102,6 +139,32 @@
           "default": null,
           "title": "Claim"
         },
+        "start_char": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Char"
+        },
+        "end_char": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Char"
+        },
         "evidence_type": {
           "default": "author_claim",
           "enum": [
@@ -117,6 +180,82 @@
         "paper_id"
       ],
       "title": "EvidenceReference",
+      "type": "object"
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "description": "One brief conclusion; unsupported placeholder findings are unrepresentable.",
+      "properties": {
+        "statement": {
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceReference"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "statement",
+        "evidence"
+      ],
+      "title": "Finding",
+      "type": "object"
+    },
+    "KeyPaper": {
+      "additionalProperties": false,
+      "properties": {
+        "paper_id": {
+          "minLength": 1,
+          "title": "Paper Id",
+          "type": "string"
+        },
+        "selection_reason": {
+          "default": "",
+          "title": "Selection Reason",
+          "type": "string"
+        },
+        "evidence_level": {
+          "default": "metadata_only",
+          "enum": [
+            "metadata_only",
+            "abstract_only",
+            "partial_fulltext",
+            "fulltext"
+          ],
+          "title": "Evidence Level",
+          "type": "string"
+        }
+      },
+      "required": [
+        "paper_id"
+      ],
+      "title": "KeyPaper",
+      "type": "object"
+    },
+    "NextStep": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "minLength": 1,
+          "title": "Action",
+          "type": "string"
+        },
+        "rationale": {
+          "default": "",
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "NextStep",
       "type": "object"
     },
     "PageMapping": {
@@ -380,6 +519,84 @@
           "default": null,
           "title": "Markdown Path"
         },
+        "pdf_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pdf Artifact Id"
+        },
+        "markdown_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Markdown Artifact Id"
+        },
+        "acquisition_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "not_attempted",
+                "downloaded",
+                "unavailable",
+                "failed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Acquisition Status"
+        },
+        "conversion_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "not_attempted",
+                "converted",
+                "partial",
+                "failed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversion Status"
+        },
+        "reading_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "metadata_only",
+                "abstract_only",
+                "partial_fulltext",
+                "fulltext"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reading Status"
+        },
         "page_map": {
           "items": {
             "$ref": "#/$defs/PageMapping"
@@ -496,6 +713,16 @@
           "title": "Summary Scope",
           "type": "string"
         },
+        "overview": {
+          "default": "",
+          "title": "Overview",
+          "type": "string"
+        },
+        "deep_analysis": {
+          "default": "",
+          "title": "Deep Analysis",
+          "type": "string"
+        },
         "research_question": {
           "default": "",
           "title": "Research Question",
@@ -586,6 +813,18 @@
           "default": null,
           "title": "Summary Path"
         },
+        "summary_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary Artifact Id"
+        },
         "markdown": {
           "default": "",
           "title": "Markdown",
@@ -603,6 +842,80 @@
         "paper_id"
       ],
       "title": "PaperSummary",
+      "type": "object"
+    },
+    "ResearchBrief": {
+      "additionalProperties": false,
+      "properties": {
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "maxItems": 3,
+          "title": "Findings",
+          "type": "array"
+        },
+        "key_papers": {
+          "items": {
+            "$ref": "#/$defs/KeyPaper"
+          },
+          "title": "Key Papers",
+          "type": "array"
+        },
+        "next_step": {
+          "$ref": "#/$defs/NextStep"
+        },
+        "limitations": {
+          "items": {
+            "$ref": "#/$defs/ResearchLimitation"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "report_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Report Artifact Id"
+        }
+      },
+      "required": [
+        "next_step"
+      ],
+      "title": "ResearchBrief",
+      "type": "object"
+    },
+    "ResearchLimitation": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "impact": {
+          "default": "",
+          "title": "Impact",
+          "type": "string"
+        },
+        "paper_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Paper Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "title": "ResearchLimitation",
       "type": "object"
     },
     "ResearchReport": {
@@ -672,6 +985,18 @@
           "default": null,
           "title": "Report Path"
         },
+        "report_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Report Artifact Id"
+        },
         "markdown": {
           "default": "",
           "title": "Markdown",
@@ -728,6 +1053,58 @@
       ],
       "title": "StageTiming",
       "type": "object"
+    },
+    "ToolCallRecord": {
+      "additionalProperties": false,
+      "description": "One MCP tool invocation issued by the main Agent.",
+      "properties": {
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "duration_seconds": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "status": {
+          "default": "pending",
+          "title": "Status",
+          "type": "string"
+        },
+        "controller": {
+          "default": "model_tool_call",
+          "enum": [
+            "scripted_demo",
+            "model_tool_call"
+          ],
+          "title": "Controller",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "tool"
+      ],
+      "title": "ToolCallRecord",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -770,6 +1147,23 @@
       "title": "Execution Mode",
       "type": "string"
     },
+    "requested_execution_mode": {
+      "anyOf": [
+        {
+          "enum": [
+            "auto",
+            "parallel",
+            "sequential"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Requested Execution Mode"
+    },
     "top_k": {
       "default": 5,
       "maximum": 100,
@@ -798,6 +1192,34 @@
       "title": "Summaries",
       "type": "array"
     },
+    "brief": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResearchBrief"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "delivery_status": {
+      "anyOf": [
+        {
+          "enum": [
+            "result",
+            "preliminary_notes",
+            "no_result"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Delivery Status"
+    },
     "report": {
       "anyOf": [
         {
@@ -823,6 +1245,13 @@
       "title": "Timings",
       "type": "array"
     },
+    "tool_calls": {
+      "items": {
+        "$ref": "#/$defs/ToolCallRecord"
+      },
+      "title": "Tool Calls",
+      "type": "array"
+    },
     "errors": {
       "items": {
         "$ref": "#/$defs/ErrorInfo"
@@ -836,9 +1265,39 @@
       "type": "object"
     },
     "status": {
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "partial_success",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        },
+        {
+          "enum": [
+            "queued",
+            "partial",
+            "demo_completed"
+          ],
+          "type": "string"
+        },
+        {
+          "enum": [
+            "searching",
+            "searched",
+            "selected",
+            "fulltexts_ready",
+            "summarized"
+          ],
+          "type": "string"
+        }
+      ],
       "default": "pending",
-      "title": "Status",
-      "type": "string"
+      "title": "Status"
     },
     "output_dir": {
       "anyOf": [

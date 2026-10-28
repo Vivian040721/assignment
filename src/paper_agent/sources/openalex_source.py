@@ -27,6 +27,7 @@ _ARXIV_PATTERN = re.compile(
     r"(?P<id>\d{4}\.\d{4,5}|[a-z][a-z0-9.-]*/\d{7})(?P<version>v\d+)?$",
     re.IGNORECASE,
 )
+_TITLE_QUERY = re.compile(r'^title\.search:(?:"(.*)"|(.+))$', re.IGNORECASE)
 
 
 class OpenAlexSearchError(RuntimeError):
@@ -230,11 +231,12 @@ def parse_work(work: dict[str, Any]) -> Paper:
     oa_url = _web_url(oa.get("oa_url")) if oa.get("is_oa") is True else None
     if oa_url:
         arxiv_values.append(oa_url)
-        if oa_url not in landing_urls:
-            landing_urls.append(oa_url)
         oa_pdf = _pdf_candidate(oa_url)
-        if oa_pdf and oa_pdf not in pdf_urls:
-            pdf_urls.append(oa_pdf)
+        if oa_pdf:
+            if oa_pdf not in pdf_urls:
+                pdf_urls.append(oa_pdf)
+        elif oa_url not in landing_urls:
+            landing_urls.append(oa_url)
     arxiv = next(
         (identifier for value in arxiv_values if (identifier := _arxiv_identifier(value))),
         None,
@@ -363,11 +365,20 @@ async def search_openalex(
         raise ValueError("OpenAlex limit must be an integer between 0 and 10000")
     if limit == 0:
         return []
+    title_phrase = None
+    title_match = _TITLE_QUERY.fullmatch(query.strip())
+    if title_match:
+        title_phrase = (title_match.group(1) or title_match.group(2) or "").strip()
+        if (
+            not title_phrase or len(title_phrase) > 200
+            or any(ord(char) < 32 or char in {'"', "\\"} for char in title_phrase)
+        ):
+            raise ValueError("OpenAlex title.search query is invalid")
     settings = settings or Settings.from_env()
     if client is None:
         async with httpx.AsyncClient(
             timeout=settings.http_timeout, proxy=settings.http_proxy or None,
-            follow_redirects=False,
+            trust_env=False, follow_redirects=False,
         ) as owned_client:
             return await search_openalex(query, limit, settings=settings, client=owned_client)
     headers = {"User-Agent": "group-paper-agent/0.2 (OpenAlex metadata search)"}
@@ -378,7 +389,11 @@ async def search_openalex(
     seen_ids: set[str] = set()
     page = 1
     while page * per_page <= _MAX_RESULTS:
-        params: dict[str, Any] = {"search": query.strip(), "per_page": per_page, "page": page}
+        params: dict[str, Any] = {"per_page": per_page, "page": page}
+        if title_phrase is not None:
+            params["filter"] = f'title.search:"{title_phrase}"'
+        else:
+            params["search"] = query.strip()
         try:
             response = await _get_page(client, params, settings, headers)
         except OpenAlexSearchError as error:
