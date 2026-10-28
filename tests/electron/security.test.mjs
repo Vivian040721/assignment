@@ -144,9 +144,9 @@ test('public config and service info reject missing or mistyped fields', () => {
   const { default_top_k: _ignored, ...missingTopK } = config;
   assert.throws(() => validators.validatePublicConfig(missingTopK));
   assert.throws(() => validators.validatePublicConfig({ ...config, default_execution_mode: 'turbo' }));
-  const info = { version: '0.2.2', api_version: 3, pid: 12, active_jobs: 0,
+  const info = { version: '0.3.0', api_version: 3, pid: 12, active_jobs: 0,
     data_root: 'C:\\data', config_path: 'C:\\data\\config.json' };
-  assert.equal(validators.validateServiceInfo(info).version, '0.2.2');
+  assert.equal(validators.validateServiceInfo(info).version, '0.3.0');
   assert.throws(() => validators.validateServiceInfo({ ...info, pid: 0 }));
   assert.throws(() => validators.validateServiceInfo({ ...info, active_jobs: -1 }));
   assert.throws(() => validators.validateServiceInfo({ ...info, data_root: 42 }));

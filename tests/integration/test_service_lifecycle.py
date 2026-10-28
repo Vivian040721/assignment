@@ -42,7 +42,7 @@ def test_isolated_service_publishes_private_endpoint_and_stops_cleanly(tmp_path)
             assert info_response.status_code == 200
             info = info_response.json()
             assert info == {
-                "version": "0.2.2", "api_version": 3, "pid": endpoint["pid"],
+                "version": "0.3.0", "api_version": 3, "pid": endpoint["pid"],
                 "active_jobs": 0, "data_root": str(root), "config_path": str(root / "config.json"),
             }
             unauthenticated = await client.get(endpoint["url"] + "/api/service")

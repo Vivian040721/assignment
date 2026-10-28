@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "group-paper-agent"
-version = "0.2.2"
+version = "0.3.0"
 description = "MCP v2 multi-source paper research system"
 requires-python = ">=3.11"
 dependencies = [

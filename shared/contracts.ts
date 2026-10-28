@@ -1,4 +1,4 @@
-/** v0.2.2 renderer/preload contract. No backend bearer token or saved key crosses this boundary. */
+/** v0.3.0 renderer/preload contract. No backend bearer token or saved key crosses this boundary. */
 export type ExecutionStatus = 'pending' | 'running' | 'completed' | 'partial_success' | 'failed' | 'cancelled';
 export type LegacyExecutionStatus = 'queued' | 'partial' | 'demo_completed';
 export type PipelineStageStatus = 'searching' | 'searched' | 'selected' | 'fulltexts_ready' | 'summarized';

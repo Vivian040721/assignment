@@ -46,7 +46,7 @@ try {
   await expect(page.getByRole('heading', { name: '从一个研究问题开始' })).toBeVisible();
   const info = await page.evaluate(() => window.paperAgent.info());
   assert.equal(info.api_version, 3);
-  assert.equal(info.version, '0.2.2');
+  assert.equal(info.version, '0.3.0');
   assert.equal(path.resolve(info.data_root), profile);
   assert.equal('token' in info, false);
   const isolation = await page.evaluate(() => ({ node: typeof window.require, process: typeof window.process,

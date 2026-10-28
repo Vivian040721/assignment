@@ -210,7 +210,7 @@ const server = http.createServer(async (request, response) => {
       return json(response, 200, { submissions, sse_connections: Object.fromEntries(sseConnections) });
     }
     if (url.pathname === '/api/service' && request.method === 'GET') {
-      return json(response, 200, { version: '0.2.2', api_version: 3, pid: process.pid,
+      return json(response, 200, { version: '0.3.0', api_version: 3, pid: process.pid,
         active_jobs: 0, data_root: dataRoot, config_path: path.join(dataRoot, 'config.json') });
     }
     if (url.pathname === '/api/service/shutdown' && request.method === 'POST') {

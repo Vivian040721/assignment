@@ -102,7 +102,7 @@ def test_service_info_matches_contract_and_never_contains_tokens_or_keys(tmp_pat
     info = response.json()
     assert response.status_code == 200
     assert set(info) == {"version", "api_version", "pid", "active_jobs", "data_root", "config_path"}
-    assert info["version"] == "0.2.2"
+    assert info["version"] == "0.3.0"
     assert info["api_version"] == 3
     assert info["pid"] == endpoint["pid"]
     assert info["active_jobs"] == 0
@@ -134,7 +134,7 @@ def test_service_info_checks_pid_and_canonical_data_root(monkeypatch, tmp_path):
     root = (tmp_path / "user-data").resolve()
     endpoint = {"url": "http://127.0.0.1:43871", "mcp_url": "http://127.0.0.1:43871/mcp",
                 "pid": 1234, "api_version": API_VERSION, "data_root": str(root), "token": TOKEN}
-    valid = {"version": "0.2.2", "api_version": API_VERSION, "pid": 1234, "active_jobs": 0,
+    valid = {"version": "0.3.0", "api_version": API_VERSION, "pid": 1234, "active_jobs": 0,
              "data_root": str(root), "config_path": str(root / "config.json")}
 
     class Response:
@@ -169,7 +169,7 @@ def test_start_refuses_to_attach_or_spawn_over_an_old_service(monkeypatch, tmp_p
 def test_service_control_json_is_private_only_for_start(monkeypatch, capsys, tmp_path):
     endpoint = {"url": "http://127.0.0.1:43871", "mcp_url": "http://127.0.0.1:43871/mcp",
                 "pid": 1234, "api_version": API_VERSION, "data_root": str(tmp_path), "token": TOKEN}
-    info = {"version": "0.2.2", "api_version": API_VERSION, "pid": 1234, "active_jobs": 0,
+    info = {"version": "0.3.0", "api_version": API_VERSION, "pid": 1234, "active_jobs": 0,
             "data_root": str(tmp_path), "config_path": str(tmp_path / "config.json")}
     monkeypatch.setattr(service_control, "ensure_service", lambda _root: endpoint)
     monkeypatch.setattr(service_control, "read_descriptor", lambda _root: endpoint)
