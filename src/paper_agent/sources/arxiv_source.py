@@ -7,6 +7,7 @@ processes or machines must additionally coordinate their overall arXiv quota.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import threading
 import time
@@ -29,6 +30,10 @@ _FIELD_QUERY = re.compile(
     r"(?<!\w)(?:all|ti|au|abs|co|jr|cat|rn|id|doi|submittedDate|lastUpdatedDate):", re.I
 )
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_PAGE_SIZE = 40
+_MAX_RESULTS = 2000
+_MAX_PAGES = 100
+_MAX_STALLED_PAGES = 3
 
 
 class ArxivSourceError(RuntimeError):
@@ -92,7 +97,10 @@ def _text(element: ET.Element, name: str) -> str:
 def _identifier(raw: str) -> tuple[str, str | None]:
     value = unquote(raw.strip())
     if "://" in value:
-        url = urlsplit(value)
+        try:
+            url = urlsplit(value)
+        except ValueError:
+            raise ArxivSourceError("invalid_entry", "arXiv 条目包含无效论文标识 URL。") from None
         if url.hostname not in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}:
             raise ArxivSourceError("invalid_entry", "arXiv 条目包含意外的 ID 主机。")
         if not url.path.startswith("/abs/"):
@@ -109,7 +117,10 @@ def _pdf_link(entry: ET.Element, base_id: str) -> str | None:
     for link in entry.findall("a:link", NS):
         if link.get("title", "").lower() != "pdf" and link.get("type") != "application/pdf":
             continue
-        url = urlsplit(link.get("href", ""))
+        try:
+            url = urlsplit(link.get("href", ""))
+        except ValueError:
+            continue
         if url.scheme not in {"http", "https"} or url.hostname not in {
             "arxiv.org", "www.arxiv.org", "export.arxiv.org"
         }:
@@ -123,12 +134,26 @@ def _pdf_link(entry: ET.Element, base_id: str) -> str | None:
     return None
 
 
-def parse_feed(xml: str | bytes) -> list[Paper]:
-    """Parse a genuine Atom feed; malformed/error feeds raise source errors.
+def _merge_paper(papers: dict[str, Paper], paper: Paper) -> None:
+    previous = papers.get(paper.paper_id)
+    if previous is not None:
+        records = previous.source_records + [
+            record for record in paper.source_records if record not in previous.source_records
+        ]
+        old_version = int((previous.arxiv_version or "v0")[1:])
+        new_version = int((paper.arxiv_version or "v0")[1:])
+        paper = paper if new_version > old_version else previous
+        paper.source_records = records
+    papers[paper.paper_id] = paper
 
-    Duplicate versions share one base ID. The newest listed version supplies the
-    metadata while every original source record remains available for auditing.
-    """
+
+def parse_feed(xml: str | bytes) -> list[Paper]:
+    """Parse an Atom feed, keeping the newest version and all source records."""
+    return _parse_page(xml)[0]
+
+
+def _parse_page(xml: str | bytes) -> tuple[list[Paper], int]:
+    """Return papers and the raw entry count used for pagination offsets."""
     try:
         root = ET.fromstring(xml)
     except (ET.ParseError, ValueError) as error:
@@ -136,7 +161,8 @@ def parse_feed(xml: str | bytes) -> list[Paper]:
     if root.tag != "{" + NS["a"] + "}feed":
         raise ArxivSourceError("invalid_feed", "arXiv 响应不是 Atom feed。")
     papers: dict[str, Paper] = {}
-    for entry in root.findall("a:entry", NS):
+    entries = root.findall("a:entry", NS)
+    for entry in entries:
         raw_id = _text(entry, "a:id")
         title = _text(entry, "a:title")
         if "/api/errors" in raw_id or title.lower() == "error":
@@ -182,15 +208,8 @@ def parse_feed(xml: str | bytes) -> list[Paper]:
                 "comment": _text(entry, "x:comment") or None,
             },
         )
-        previous = papers.get(base_id)
-        if previous is not None:
-            records = previous.source_records + [r for r in paper.source_records if r not in previous.source_records]
-            old_version = int((previous.arxiv_version or "v0")[1:])
-            new_version = int((version or "v0")[1:])
-            paper = paper if new_version > old_version else previous
-            paper.source_records = records
-        papers[base_id] = paper
-    return list(papers.values())
+        _merge_paper(papers, paper)
+    return list(papers.values()), len(entries)
 
 
 def build_query(query: str) -> str:
@@ -218,7 +237,8 @@ def build_query(query: str) -> str:
 def _retry_after(response: httpx.Response) -> float:
     value = response.headers.get("Retry-After", "").strip()
     try:
-        return max(0.0, float(value))
+        delay = float(value)
+        return max(0.0, delay) if math.isfinite(delay) else 0.0
     except ValueError:
         try:
             date = parsedate_to_datetime(value)
@@ -229,31 +249,15 @@ def _retry_after(response: httpx.Response) -> float:
             return 0.0
 
 
-async def search_arxiv(
-    query: str,
-    limit: int,
+async def _request_page(
+    search_query: str,
+    start: int,
+    page_size: int,
     *,
-    settings: Settings | None = None,
-    client: httpx.AsyncClient | None = None,
-) -> list[Paper]:
-    """Search up to 2000 records in one official arXiv API slice.
-
-    A supplied client remains owned by the caller. Timeouts, exhausted retryable
-    failures, HTTP errors and bad feeds raise ArxivSourceError with ErrorInfo.
-    Validation errors raise ValueError before making any network request.
-    """
-    search_query = build_query(query)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2000:
-        raise ValueError("limit must be an integer between 1 and 2000")
-    settings = settings or Settings.from_env()
-    if client is None:
-        async with httpx.AsyncClient(
-            timeout=settings.http_timeout,
-            proxy=settings.http_proxy or None,
-            follow_redirects=False,
-            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
-        ) as owned_client:
-            return await search_arxiv(query, limit, settings=settings, client=owned_client)
+    settings: Settings,
+    client: httpx.AsyncClient,
+) -> tuple[list[Paper], int]:
+    """Fetch one page; retries retain the same offset and use the shared gate."""
     # Configuration may increase the interval but cannot violate the API terms.
     interval = max(3.0, settings.arxiv_request_interval)
     for attempt in range(settings.http_max_retries + 1):
@@ -262,7 +266,7 @@ async def search_arxiv(
                 response = await client.get(
                     API_URL,
                     params={
-                        "search_query": search_query, "start": 0, "max_results": limit,
+                        "search_query": search_query, "start": start, "max_results": page_size,
                         "sortBy": "relevance", "sortOrder": "descending",
                     },
                     timeout=settings.http_timeout,
@@ -276,7 +280,7 @@ async def search_arxiv(
             code = "timeout" if isinstance(error, httpx.TimeoutException) else "network_error"
             raise ArxivSourceError(
                 code, "arXiv 请求在有限重试后仍失败。", retryable=True,
-                attempts=attempt + 1, exception_type=type(error).__name__,
+                attempts=attempt + 1, exception_type=type(error).__name__, start=start,
             ) from None
         if response.status_code in _RETRYABLE_STATUS and attempt < settings.http_max_retries:
             await asyncio.sleep(max(_retry_after(response), settings.http_retry_backoff * (2**attempt)))
@@ -286,10 +290,74 @@ async def search_arxiv(
                 "rate_limited" if response.status_code == 429 else "http_error",
                 f"arXiv 返回 HTTP {response.status_code}",
                 retryable=response.status_code in _RETRYABLE_STATUS,
-                status_code=response.status_code, attempts=attempt + 1,
+                status_code=response.status_code, attempts=attempt + 1, start=start,
             )
-        return parse_feed(response.content)[:limit]
+        return _parse_page(response.content)
     raise ArxivSourceError("invalid_config", "arXiv 重试次数不能为负数。")
+
+
+async def search_arxiv(
+    query: str,
+    limit: int,
+    *,
+    settings: Settings | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[Paper]:
+    """Search up to 2000 unique papers using pages of at most 40 raw entries.
+
+    Offsets count raw entries, not deduplicated papers. A short/empty page ends
+    retrieval. Duplicate compensation scans at most twice limit raw slots,
+    with at most 100 pages and three consecutive pages without a new base ID.
+    Exhausting a safety bound raises a source error rather than returning an
+    apparently successful partial result.
+
+    A supplied client remains owned by the caller. Timeouts, exhausted retryable
+    failures, HTTP errors and bad feeds raise ArxivSourceError with ErrorInfo.
+    Validation errors raise ValueError before making any network request.
+    """
+    search_query = build_query(query)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_RESULTS:
+        raise ValueError("limit must be an integer between 1 and 2000")
+    settings = settings or Settings.from_env()
+    if client is None:
+        async with httpx.AsyncClient(
+            timeout=settings.http_timeout,
+            proxy=settings.http_proxy or None,
+            follow_redirects=False,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        ) as owned_client:
+            return await search_arxiv(query, limit, settings=settings, client=owned_client)
+    papers: dict[str, Paper] = {}
+    start, stalled_pages = 0, 0
+    scan_limit = 2 * limit
+    for _ in range(_MAX_PAGES):
+        page_size = min(_PAGE_SIZE, limit - len(papers), scan_limit - start)
+        if page_size <= 0:
+            break
+        page_papers, raw_count = await _request_page(
+            search_query, start, page_size, settings=settings, client=client,
+        )
+        previous_count = len(papers)
+        for paper in page_papers:
+            _merge_paper(papers, paper)
+        if len(papers) >= limit:
+            return list(papers.values())[:limit]
+        if raw_count < page_size:
+            return list(papers.values())
+        start += raw_count
+        stalled_pages = stalled_pages + 1 if len(papers) == previous_count else 0
+        if stalled_pages >= _MAX_STALLED_PAGES:
+            raise ArxivSourceError(
+                "pagination_stalled",
+                "arXiv 分页连续未返回新论文。",
+                start=start, unique_count=len(papers), limit=limit,
+            )
+    raise ArxivSourceError(
+        "pagination_limit",
+        "arXiv 分页达到安全扫描上限，检索未完成。",
+        start=start, unique_count=len(papers), limit=limit,
+        scan_limit=scan_limit, max_pages=_MAX_PAGES,
+    )
 
 
 class ArxivSource:
