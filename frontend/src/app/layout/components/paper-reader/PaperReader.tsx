@@ -17,8 +17,11 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
   const currentJob = resultJob ?? activeJob;
   const [remoteJob, setRemoteJob] = useState<Job | null>(null);
   const [remoteLoading, setRemoteLoading] = useState(false);
-  const [remoteError, setRemoteError] = useState<string | null>(null);
-  const job = tab.jobId && tab.jobId !== currentJob?.job_id ? remoteJob : currentJob;
+  const [remoteError, setRemoteError] = useState<{ jobId: string; message: string } | null>(null);
+  const remoteTargetId = tab.jobId && tab.jobId !== currentJob?.job_id ? tab.jobId : null;
+  const job = remoteTargetId
+    ? (remoteJob?.job_id === remoteTargetId ? remoteJob : null)
+    : currentJob;
 
   useEffect(() => {
     if (!tab.jobId || tab.jobId === currentJob?.job_id) {
@@ -33,7 +36,7 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
     void Promise.resolve().then(() => desktopApi().job(tab.jobId!)).then(value => {
       if (!cancelled) setRemoteJob(value);
     }).catch(error => {
-      if (!cancelled) setRemoteError(error instanceof Error ? error.message : String(error));
+      if (!cancelled) setRemoteError({ jobId: tab.jobId!, message: error instanceof Error ? error.message : String(error) });
     }).finally(() => {
       if (!cancelled) setRemoteLoading(false);
     });
@@ -93,7 +96,7 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
       <span className="skeleton-line wide"/><span className="skeleton-line"/><span className="skeleton-line medium"/>
     </div>;
   }
-  if (remoteError) return <div className="panel-empty"><span><FileText size={20}/></span><strong>所属任务暂时不可读取</strong><p>{remoteError}</p></div>;
+  if (remoteError?.jobId === remoteTargetId) return <div className="panel-empty"><span><FileText size={20}/></span><strong>所属任务暂时不可读取</strong><p>{remoteError.message}</p></div>;
   if (!paper) return <div className="panel-empty"><span><FileText size={20}/></span><strong>该论文不在所属任务结果中</strong><p>论文标签会保留最近打开的任务上下文；可在标签栏关闭后从当前结果重新打开。</p></div>;
 
   const selectedPdfArtifact = selectedPdfId
@@ -151,7 +154,7 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
     }
   };
   const locateEvidence = (item: EvidenceReference) => {
-    if (!canLocatePdfEvidence(item)) return;
+    if (!canLocatePdfEvidence(item) || item.paper_id !== paper.paper_id) return;
     setSelectedPdfId(item.pdf_artifact_id!);
     setRequestedPage(item.page_number!);
     setJumpRevision(value => value + 1);
@@ -196,7 +199,7 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
       {evidence.length > 0 && <section className="evidence-list" aria-label="研究笔记证据与页码">
         <h3>证据与原文定位</h3>
         <ol>{evidence.map((item, index) => {
-          const locatable = canLocatePdfEvidence(item);
+          const locatable = item.paper_id === paper.paper_id && canLocatePdfEvidence(item);
           return <li key={`${item.paper_id}:${item.page_number ?? 'none'}:${index}`}>
             {(item.quote || item.claim) && <p>{item.quote || item.claim}</p>}
             <div>{item.section && <span>{item.section}</span>}{typeof item.page_number === 'number' && (locatable
@@ -210,9 +213,10 @@ export function PaperReader({ tab }: { tab: LayoutTab }) {
       jobId={job.job_id}
       artifact={selectedPdfArtifact}
       initialPage={requestedPage}
+      onPageChange={setRequestedPage}
     /> : <div className="inline-warning">所属任务或 PDF artifact 不可用，无法读取原文。</div>}
 
-    {markdownArtifact && <details className="technical-details reader-technical-details">
+    {markdownArtifact && <details className="technical-details reader-technical-details" onToggle={event => { if (event.currentTarget.open) setShowFulltext(true); }}>
       <summary>查看提取的 Markdown</summary>
       <p>该文本由服务端从 PDF 提取，只用于核对；阅读原文请使用上方 PDF。</p>
       {loading && <div className="reader-loading" aria-live="polite"><span className="skeleton-line wide"/><span className="skeleton-line"/></div>}

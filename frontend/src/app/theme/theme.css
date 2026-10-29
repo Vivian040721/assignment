@@ -877,6 +877,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-faint); }
 .pdf-stage { position: relative; min-height: 430px; max-height: min(72vh, 860px); overflow: auto; padding: 18px; border: 1px solid var(--line); border-top: 0; border-radius: 0 0 8px 8px; background: var(--surface-sunken); }
 .pdf-canvas { display: block; max-width: none; margin: 0 auto; background: #fff; box-shadow: 0 2px 14px rgba(43, 37, 29, .12); transition: opacity var(--motion-fast) var(--ease-standard); }
 .pdf-canvas.is-rendering { opacity: .48; }
+.pdf-canvas.has-error { display: none; }
 .pdf-rendering { position: absolute; top: 12px; left: 50%; display: flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink-muted); background: var(--surface-raised); font-size: 9px; box-shadow: var(--shadow-xs); transform: translateX(-50%); }
 .pdf-page-total, .pdf-search-count { color: var(--ink-muted); font-size: 9px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pdf-search { flex-wrap: wrap; }
@@ -884,6 +885,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-faint); }
 .pdf-loading, .pdf-unavailable { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 22px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink-muted); background: var(--surface-soft); text-align: center; }
 .pdf-unavailable strong { color: var(--ink-soft); font-size: 12px; }
 .pdf-unavailable p { max-width: 45ch; margin: 0; font-size: 10px; line-height: 1.65; }
+.pdf-render-error { position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--warning-ink); background: var(--surface-soft); font-size: 10px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .workspace-focus-reading .pdf-stage { max-height: calc(100dvh - 315px); min-height: 540px; }
 @media (max-width: 620px) {
