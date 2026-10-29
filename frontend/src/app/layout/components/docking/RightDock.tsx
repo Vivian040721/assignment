@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Activity, BookOpen, ChevronDown, ChevronLeft, ChevronRight, Columns2, FileText, Gauge, Maximize2, Minimize2, MoreHorizontal, Plus, Settings2, X } from 'lucide-react';
-import type { CSSProperties, DragEvent, KeyboardEvent } from 'react';
+import type { CSSProperties, DragEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { DockGroup, LayoutTab, PanelKind } from '../../../types/ui';
 import { layoutStore, useLayoutState } from '../../stores/layoutStore';
 import { ActivityPanel } from '../activity/ActivityPanel';
@@ -23,6 +23,8 @@ export function RightDock({ hidden = false }: { hidden?: boolean }) {
   const layout = useLayoutState();
   const [addOpen, setAddOpen] = useState(false);
   const rootRef = useRef<HTMLElement | null>(null);
+  const addPanelRef = useRef<HTMLDivElement | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
   const split = layout.groups.length > 1;
   const active = layout.groups.find(group => group.id === layout.activeGroupId);
   const canSplit = Boolean(active?.activeTabId) && !split;
@@ -33,14 +35,33 @@ export function RightDock({ hidden = false }: { hidden?: boolean }) {
     else rootRef.current.removeAttribute('inert');
   }, [hidden]);
 
+  useEffect(() => {
+    if (!addOpen) return;
+    const onOutsideClick = (event: PointerEvent) => {
+      if (!addPanelRef.current?.contains(event.target as Node)) setAddOpen(false);
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setAddOpen(false);
+      addButtonRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', onOutsideClick);
+    document.addEventListener('keydown', onEscape);
+    return () => {
+      document.removeEventListener('pointerdown', onOutsideClick);
+      document.removeEventListener('keydown', onEscape);
+    };
+  }, [addOpen]);
+
   return <aside ref={rootRef} className={`right-dock ${split ? 'dock-split' : ''} ${hidden ? 'is-hidden' : ''}`} aria-label="资料 Dock" aria-hidden={hidden || undefined}>
     <header className="dock-header">
       <div className="dock-heading"><span className="dock-heading-mark"><BookOpen size={15}/></span><div><strong>研究资料</strong><small>{split ? '双组视图 · 拖动标签可移动' : '论文、报告与任务记录'}</small></div></div>
       <div className="dock-header-actions">
         <button className={`dock-action ${layout.focusReading ? 'is-active' : ''}`} type="button" aria-label={layout.focusReading ? '退出专注阅读' : '进入专注阅读'} aria-pressed={layout.focusReading} title={layout.focusReading ? '退出专注阅读（Esc）' : '专注阅读：隐藏侧栏和对话，保留标签与会话'} onClick={() => layoutStore.toggleFocusReading()}>{layout.focusReading ? <Minimize2 size={15}/> : <Maximize2 size={15}/>}</button>
         <button className="dock-action" type="button" aria-label={split ? '合并分组' : '分成两个组'} title={split ? '合并分组' : '把当前标签分到第二组'} disabled={!split && !canSplit} onClick={() => split ? layoutStore.mergeGroups() : layoutStore.splitActiveTab()}><Columns2 size={15}/></button>
-        <div className="add-panel-wrap">
-          <button className="dock-action" type="button" aria-label="添加 Dock 面板" aria-expanded={addOpen} onClick={() => setAddOpen(value => !value)}><Plus size={16}/><ChevronDown size={11}/></button>
+        <div className="add-panel-wrap" ref={addPanelRef}>
+          <button ref={addButtonRef} className="dock-action" type="button" aria-label="添加 Dock 面板" aria-expanded={addOpen} onClick={() => setAddOpen(value => !value)}><Plus size={16}/><ChevronDown size={11}/></button>
           {addOpen && <div className="add-panel-menu" role="menu">{panelOptions.map(option => {
             const Icon = option.icon;
             const alreadyOpen = layout.groups.some(group => group.tabs.some(tab => tab.id === `panel:${option.kind}`));
@@ -124,8 +145,18 @@ function DockGroupView({ group }: { group: DockGroup }) {
     const close = (event: PointerEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
     };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setMenuOpen(false);
+      menuRef.current?.querySelector<HTMLButtonElement>('.dock-overflow-trigger')?.focus();
+    };
     document.addEventListener('pointerdown', close);
-    return () => document.removeEventListener('pointerdown', close);
+    document.addEventListener('keydown', onEscape);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', onEscape);
+    };
   }, [menuOpen]);
 
   const scrollTabs = (direction: 1 | -1) => {
@@ -148,7 +179,7 @@ function DockGroupView({ group }: { group: DockGroup }) {
     layoutStore.moveTab(tabId, group.id, index);
   };
 
-  const keyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: LayoutTab) => {
+  const keyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, tab: LayoutTab) => {
     const tabs = tabsRef.current ? [...tabsRef.current.querySelectorAll<HTMLButtonElement>('[role="tab"]')] : [];
     const currentIndex = tabs.indexOf(event.currentTarget);
     if (event.ctrlKey && event.shiftKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {

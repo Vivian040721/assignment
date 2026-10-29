@@ -169,6 +169,7 @@ export const layoutStore = {
     if (state.sidebarCollapsed !== value) patch({ sidebarCollapsed: value });
   },
   setSidebarWidth(value: number): void {
+    if (!Number.isFinite(value)) return;
     const sidebarWidth = Math.max(220, Math.min(380, Math.round(value)));
     if (sidebarWidth !== state.sidebarWidth) patch({ sidebarWidth });
   },
@@ -186,10 +187,12 @@ export const layoutStore = {
     this.setFocusReading(!state.focusReading);
   },
   setDockWidth(value: number): void {
+    if (!Number.isFinite(value)) return;
     const dockWidth = Math.max(310, Math.min(520, Math.round(value)));
     if (dockWidth !== state.dockWidth) patch({ dockWidth });
   },
   setDockHeight(value: number): void {
+    if (!Number.isFinite(value)) return;
     const dockHeight = Math.max(200, Math.min(560, Math.round(value)));
     if (dockHeight !== state.dockHeight) patch({ dockHeight });
   },
@@ -247,8 +250,9 @@ export const layoutStore = {
     if (!source || !destination) return;
     const sourceIndex = source.tabs.findIndex(tab => tab.id === tabId);
     const tab = source.tabs[sourceIndex];
-    let index = destinationIndex ?? destination.tabs.length;
-    index = Math.max(0, Math.min(destination.tabs.length, Math.floor(index)));
+    let index = destinationIndex === undefined || !Number.isFinite(destinationIndex)
+      ? destination.tabs.length
+      : Math.max(0, Math.min(destination.tabs.length, Math.floor(destinationIndex)));
     const sourceTabs = [...source.tabs];
     sourceTabs.splice(sourceIndex, 1);
     const sourceActive = source.activeTabId === tabId ? sourceTabs[Math.min(sourceIndex, sourceTabs.length - 1)]?.id ?? null : source.activeTabId;

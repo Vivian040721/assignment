@@ -9,10 +9,13 @@ export function Sidebar({ compact }: { compact: boolean }) {
   const workspace = useWorkspaceState();
   const layout = useLayoutState();
   const [filter, setFilter] = useState('');
-  const conversations = workspace.conversations.filter(item => item.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase()));
+  const shortMode = compact || layout.sidebarCollapsed;
+  // A hidden search input must not continue filtering the collapsed navigation rail.
+  const conversations = shortMode
+    ? workspace.conversations
+    : workspace.conversations.filter(item => item.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase()));
   const selectedId = workspace.conversationId;
   const selectedReadOnly = (workspace.conversation as (typeof workspace.conversation & { read_only?: boolean }))?.read_only === true;
-  const shortMode = compact || layout.sidebarCollapsed;
 
   return <aside id="app-sidebar" className={`sidebar ${shortMode ? 'sidebar-compact' : ''}`} aria-label="会话导航">
     <div className="sidebar-brand">
