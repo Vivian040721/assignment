@@ -5,6 +5,7 @@ import { desktopApi } from '../../../services/desktopApi';
 import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStore';
 import { errorLabel } from '../../../utils/labels';
 import { readableReportMarkdown } from '../../../utils/reportMarkdown';
+import { visibleReportDocument, type LoadedReportDocument } from '../../../utils/resultPresentation';
 import { deliveryStatusFor, deliveryStatusLabels, reportArtifactFor } from '../../../utils/researchBrief';
 import { MarkdownContent } from '../common/MarkdownContent';
 
@@ -15,11 +16,14 @@ export function ResearchReport() {
   const result = job?.result ?? conversation?.result ?? null;
   const artifacts = job?.artifacts ?? [];
   const reportArtifact = reportArtifactFor(result, artifacts);
-  const [markdown, setMarkdown] = useState(report?.markdown ?? '');
-  const [truncated, setTruncated] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [exportedPath, setExportedPath] = useState<string | null>(null);
+  // Keep artifact text attached to the job/artifact that supplied it. A new
+  // result must never briefly display or copy an earlier report while loading.
+  const reportKey = job && reportArtifact ? `${job.job_id}:${reportArtifact.artifact_id}` : null;
+  const [artifactDocument, setArtifactDocument] = useState<LoadedReportDocument | null>(null);
+  const [exported, setExported] = useState<{ key: string; path: string } | null>(null);
+  const inlineMarkdown = report?.markdown?.trim() ? report.markdown : '';
+  const { markdown, truncated, loading, error } = visibleReportDocument(inlineMarkdown, reportKey, artifactDocument);
+  const exportedPath = reportKey && exported?.key === reportKey ? exported.path : null;
   const contentRef = useRef<HTMLDivElement | null>(null);
   const displayMarkdown = useMemo(
     () => readableReportMarkdown(markdown, report?.comparison),
@@ -28,31 +32,16 @@ export function ResearchReport() {
   const hasSubstance = reportHasSubstance(report, displayMarkdown);
 
   useEffect(() => {
+    if (!job || !reportArtifact || !reportKey || inlineMarkdown) return;
     let current = true;
-    setError(null);
-    if (report?.markdown) {
-      setMarkdown(report.markdown);
-      setLoading(false);
-      return () => { current = false; };
-    }
-    if (!job || !reportArtifact) {
-      setMarkdown('');
-      setLoading(false);
-      return () => { current = false; };
-    }
-    setLoading(true);
+    setArtifactDocument({ key: reportKey, text: '', truncated: false, error: null, loading: true });
     void Promise.resolve().then(() => desktopApi().readArtifact(job.job_id, reportArtifact.artifact_id)).then(value => {
-      if (current) {
-        setMarkdown(value.text);
-        setTruncated(value.truncated);
-      }
+      if (current) setArtifactDocument({ key: reportKey, text: value.text, truncated: value.truncated, error: null, loading: false });
     }).catch(reason => {
-      if (current) setError(reason instanceof Error ? reason.message : String(reason));
-    }).finally(() => {
-      if (current) setLoading(false);
+      if (current) setArtifactDocument({ key: reportKey, text: '', truncated: false, error: reason instanceof Error ? reason.message : String(reason), loading: false });
     });
     return () => { current = false; };
-  }, [job?.job_id, report?.markdown, reportArtifact?.artifact_id]);
+  }, [reportKey, inlineMarkdown]);
 
   const copyReport = async () => {
     if (!displayMarkdown) return;
@@ -67,7 +56,7 @@ export function ResearchReport() {
     if (!job || !reportArtifact) return;
     try {
       const response = await desktopApi().exportArtifact(job.job_id, reportArtifact.artifact_id);
-      setExportedPath(response.cancelled ? null : response.path ?? null);
+      if (reportKey) setExported(response.cancelled || !response.path ? null : { key: reportKey, path: response.path });
       workspaceStore.setNotice(response.cancelled ? '已取消导出。' : response.path ? `报告已导出到：${response.path}` : '报告导出完成。');
     } catch (reason) {
       workspaceStore.setError(reason instanceof Error ? reason.message : String(reason));
@@ -97,7 +86,9 @@ export function ResearchReport() {
   if (!report && !reportArtifact) return <div className="panel-empty"><span><FileText size={21}/></span><strong>研究报告尚未生成</strong><p>完成研究任务后，服务端返回的报告会在这里预览。失败和部分结果会按原状态保留。</p></div>;
 
   const reportErrors = collectReportErrors(result, report);
-  const state = reportState(result, report, reportErrors, hasSubstance);
+  const state = loading
+    ? { label: '读取中', tone: 'pending', title: '正在读取研究报告', note: '正在读取当前任务的报告文件。' }
+    : reportState(result, report, reportErrors, hasSubstance);
   const headings = markdownHeadings(displayMarkdown);
   const references = report?.references ?? [];
   const reportLimitations = (report?.limitations ?? []).filter(item =>
@@ -202,8 +193,7 @@ function reportHasSubstance(
   if (report) {
     const hasFields = Boolean(
       report.overview?.trim() || report.related_work?.length || report.comparison?.length
-      || report.researched_questions?.length || report.limitations?.length
-      || report.research_directions?.length,
+      || report.researched_questions?.length || report.research_directions?.length,
     );
     if (hasFields) return true;
   }

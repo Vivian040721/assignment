@@ -1,7 +1,8 @@
 import { ArrowUpRight, BookOpen, Search } from 'lucide-react';
-import type { Paper, Summary } from '../../../types/contracts';
+import type { Artifact, Paper, Summary } from '../../../types/contracts';
 import { useWorkspaceState } from '../../../stores/workspaceStore';
 import { collectPapers, summaryScopeLabel, summaryStatus, summaryStatusLabel } from '../../../utils/papers';
+import { displayedPapers, paperMaterialNote } from '../../../utils/resultPresentation';
 import { layoutStore } from '../../stores/layoutStore';
 
 export function PaperList() {
@@ -11,13 +12,8 @@ export function PaperList() {
   const result = collection.result;
   const jobId = resultOwner?.job_id;
   const summaries = new Map(collection.summaries.map(summary => [summary.paper_id, summary] as const));
-  const analysisIds = result && Array.isArray(result.metrics?.analysis_paper_ids)
-    ? result.metrics.analysis_paper_ids.filter((value): value is string => typeof value === 'string')
-    : [];
-  const analysisPapers = analysisIds
-    .map(paperId => collection.paperById.get(paperId))
-    .filter((paper): paper is Paper => Boolean(paper));
-  const finalPapers = analysisPapers.length > 0 ? analysisPapers : collection.topPapers;
+  const displayed = displayedPapers(collection);
+  const artifacts = resultOwner?.artifacts ?? [];
 
   if (loadingConversation) {
     return <div className="dock-panel-skeleton" aria-live="polite">
@@ -32,31 +28,33 @@ export function PaperList() {
     <div className="paper-list-view">
       <div className="panel-intro">
         <div><span className="eyebrow">本次研究</span><h2>关键论文</h2></div>
-        {finalPapers.length > 0 && <span className="paper-count">{finalPapers.length} 篇</span>}
+        {displayed.papers.length > 0 && <span className="paper-count">{displayed.papers.length} 篇</span>}
       </div>
-      <p className="panel-subtitle">点击论文进入研究笔记；有 PDF 原文时可直接切换阅读。</p>
-      {finalPapers.length > 0 && <section className="paper-section" aria-labelledby="effective-papers-title">
-        <h3 id="effective-papers-title" className="sr-only">实际分析论文</h3>
-        {finalPapers.map((paper, index) => <PaperRow
+      <p className="panel-subtitle">{displayed.description} 点击论文进入研究笔记；已关联 PDF 文件时可尝试原文阅读。</p>
+      {displayed.papers.length > 0 && <section className="paper-section" aria-labelledby="effective-papers-title">
+        <h3 id="effective-papers-title" className="sr-only">{displayed.stage === 'analysis' ? '实际分析论文' : '精选候选论文'}</h3>
+        {displayed.papers.map((paper, index) => <PaperRow
           key={paper.paper_id}
           paper={paper}
           index={index + 1}
           jobId={jobId}
           summary={summaries.get(paper.paper_id)}
+          artifacts={artifacts}
         />)}
       </section>}
-      {finalPapers.length === 0 && <div className="panel-empty compact-empty"><span><Search size={19}/></span><strong>任务没有返回论文</strong><p>详细原因保留在执行记录中。</p></div>}
+      {displayed.papers.length === 0 && <div className="panel-empty compact-empty"><span><Search size={19}/></span><strong>任务没有返回论文</strong><p>详细原因保留在执行记录中。</p></div>}
     </div>
   );
 }
 
-function PaperRow({ paper, index, jobId, summary }: {
+function PaperRow({ paper, index, jobId, summary, artifacts }: {
   paper: Paper;
   index: number;
   jobId?: string;
   summary?: Summary;
+  artifacts: Artifact[];
 }) {
-  const material = materialNote(paper, summary);
+  const material = materialNote(paper, summary, artifacts);
   const reason = summary?.relevance?.trim() || paper.selection_reason?.trim();
   return <article className="paper-row">
     <span className="paper-rank" aria-hidden="true">{index}</span>
@@ -72,12 +70,12 @@ function PaperRow({ paper, index, jobId, summary }: {
   </article>;
 }
 
-function materialNote(paper: Paper, summary?: Summary): string {
-  const hasPdf = Boolean(paper.pdf_artifact_id || paper.pdf_path);
+function materialNote(paper: Paper, summary: Summary | undefined, artifacts: Artifact[]): string {
+  const material = paperMaterialNote(paper, artifacts);
   const status = summaryStatus(summary);
   if (summary) {
     const note = `${summaryStatusLabel(status)} · ${summaryScopeLabel(summary.summary_scope)}`;
-    return hasPdf ? `${note} · PDF 原文可读` : `${note} · PDF 原文缺失`;
+    return `${note} · ${material}`;
   }
-  return hasPdf ? 'PDF 原文可读 · 研究笔记缺失' : '当前只提供论文元数据';
+  return `${material} · 研究笔记缺失`;
 }
