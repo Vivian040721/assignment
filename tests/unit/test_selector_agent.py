@@ -374,3 +374,29 @@ def test_cancellation_propagates_instead_of_producing_a_fallback():
 
 def test_selector_prompt_requires_chinese_reason():
     assert "Simplified Chinese" in SELECTOR_SYSTEM_PROMPT
+
+
+def test_equal_scores_follow_candidate_order_and_normalize_ranks():
+    papers = candidates(3)
+    value = response(['p2', 'p0', 'p1'])
+    for item in value['papers']:
+        item['final_score'] = 0.8
+    ranked = validate_selection(value, papers, 3)
+    assert [p.paper_id for p in ranked] == ['p0', 'p1', 'p2']
+    assert [p.rank for p in ranked] == [1, 2, 3]
+
+
+def test_shortfall_audit_preserves_initial_top_k_and_input():
+    papers = candidates(3)
+    papers[2].initial_score = 1.0
+    original = copy.deepcopy([p.model_dump() for p in papers])
+    selected = asyncio.run(select_top_k(
+        'Agent memory', papers, 5, llm=FakeLLM(response(['p1', 'p2', 'p0'])),
+    ))
+    audit = selected[0].metadata['selection']
+    assert audit['requested_k'] == 5
+    assert audit['effective_k'] == 3
+    assert audit['candidate_shortfall'] == 2
+    assert audit['initial_top_k'] == ['p0', 'p2', 'p1']
+    assert audit['final_order'] == ['p1', 'p2', 'p0']
+    assert [p.model_dump() for p in papers] == original

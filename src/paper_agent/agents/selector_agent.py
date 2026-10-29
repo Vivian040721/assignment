@@ -279,6 +279,10 @@ def validate_selection(
         raise SelectorError("selector_invalid_output", "Selector 的相关性理由不能为空")
     if any(a.final_score < b.final_score for a, b in zip(ordered, ordered[1:])):
         raise SelectorError("selector_invalid_output", "Selector 分数必须按排名非递增")
+    candidate_order = {p.paper_id: i for i, p in enumerate(candidates)}
+    ordered.sort(key=lambda p: (-p.final_score, candidate_order[p.paper_id]))
+    for rank, item in enumerate(ordered, 1):
+        item.rank = rank
     return ordered
 
 
@@ -375,6 +379,16 @@ def _initial_audit(
         "agent": "llm_selector",
         "evidence_scope": "title_abstract_only",
         "requested_k": k,
+        "available_count": len(papers),
+        "effective_k": min(k, len(candidates)),
+        "candidate_shortfall": max(0, k - len(papers)),
+        "initial_top_k": [
+            p.paper_id for p in sorted(
+                papers,
+                key=lambda p: p.initial_score if p.initial_score is not None else -1,
+                reverse=True,
+            )[:k]
+        ],
         "input_candidate_order": [p.paper_id for p in papers],
         "initial_scores": {p.paper_id: p.initial_score for p in papers},
         "submitted_candidate_order": [p.paper_id for p in candidates],
