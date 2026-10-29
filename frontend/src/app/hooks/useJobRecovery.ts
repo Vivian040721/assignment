@@ -21,7 +21,7 @@ export function useJobRecovery(job: Job | null): void {
     let polling = false;
     let terminalPending = false;
     let timer: number | undefined;
-    const after = job.events.at(-1)?.seq ?? 0;
+    const after = job.events.reduce((max, event) => Math.max(max, event.seq), 0);
 
     const poll = async (terminalCheck = false) => {
       if (disposed) return;
@@ -33,7 +33,9 @@ export function useJobRecovery(job: Job | null): void {
       try {
         if (!disposed) await workspaceStore.refreshJob(jobId);
       } catch (error) {
-        if (!disposed) workspaceStore.setError(error instanceof Error ? error.message : String(error));
+        if (!disposed && workspaceStore.getSnapshot().activeJob?.job_id === jobId) {
+          workspaceStore.setError(error instanceof Error ? error.message : String(error));
+        }
       } finally {
         polling = false;
         if (!disposed && terminalPending) {
@@ -49,14 +51,16 @@ export function useJobRecovery(job: Job | null): void {
         if (disposed) return;
         if (event.event) workspaceStore.onJobEvent(jobId, event.event);
         if (event.error) {
-          workspaceStore.setError(event.error);
+          if (workspaceStore.getSnapshot().activeJob?.job_id === jobId) workspaceStore.setError(event.error);
           void poll();
         } else if (event.done) {
           void poll(true);
         }
       });
     } catch (error) {
-      workspaceStore.setError(error instanceof Error ? error.message : String(error));
+      if (workspaceStore.getSnapshot().activeJob?.job_id === jobId) {
+        workspaceStore.setError(error instanceof Error ? error.message : String(error));
+      }
     }
 
     timer = window.setInterval(() => void poll(), RECOVERY_POLL_MS);

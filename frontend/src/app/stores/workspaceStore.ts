@@ -50,6 +50,7 @@ const listeners = new Set<() => void>();
 let initialization: Promise<void> | null = null;
 let initializationGeneration = 0;
 let selectionSequence = 0;
+let conversationListRequest = 0;
 const submittedByJob = new Map<string, { text: string; draftKey: string; action: Action }>();
 const refreshedTerminalJobs = new Set<string>();
 
@@ -75,7 +76,8 @@ function currentDraftKey(): string {
   return state.conversationId ?? NEW_DRAFT_KEY;
 }
 
-function updateConversationList(list: ConversationSummary[]): void {
+function updateConversationList(list: ConversationSummary[], request?: number): void {
+  if (request !== undefined && request !== conversationListRequest) return;
   update({ conversations: orderedConversations(list) });
 }
 
@@ -128,10 +130,11 @@ async function refreshConversation(id: string, sequence = selectionSequence): Pr
 }
 
 async function refreshConversations(): Promise<void> {
+  const request = ++conversationListRequest;
   try {
-    updateConversationList(await desktopApi().conversations());
+    updateConversationList(await desktopApi().conversations(), request);
   } catch (error) {
-    update({ error: errorMessage(error) });
+    if (request === conversationListRequest) update({ error: errorMessage(error) });
   }
 }
 
@@ -149,19 +152,25 @@ function applyJob(job: Job): void {
   const previous = state.activeJob;
   // A GET snapshot may be older than SSE events already received by this
   // renderer. Merge by seq instead of replacing the event list wholesale.
-  const events = new Map(previous.events.map(event => [event.seq, event]));
-  for (const event of job.events) events.set(event.seq, event);
-  const merged: Job = { ...job, events: [...events.values()].sort((left, right) => left.seq - right.seq) };
+  const events = new Map(job.events.map(event => [event.seq, event]));
+  // Events already observed over SSE take precedence over an older GET snapshot.
+  for (const event of previous.events) events.set(event.seq, event);
+  // A delayed poll must not turn a finished job back into a running job.
+  const staleSnapshot = isJobFinished(previous.status) && !isJobFinished(job.status);
+  const merged: Job = {
+    ...(staleSnapshot ? previous : job),
+    events: [...events.values()].sort((left, right) => left.seq - right.seq),
+  };
   const next: Partial<WorkspaceState> = {
     activeJob: merged,
-    ...(job.action === 'research' ? { resultJob: merged } : {}),
+    ...(merged.action === 'research' ? { resultJob: merged } : {}),
   };
-  if (job.conversation && state.conversationId === job.conversation.conversation_id) next.conversation = job.conversation;
-  if (job.action === 'research' && isJobFinished(job.status) && (job.result || state.conversation?.result)) next.action = 'chat';
-  if (job.status === 'failed' || job.status === 'cancelled') next.action = job.action ?? state.action;
+  if (!staleSnapshot && job.conversation && state.conversationId === job.conversation.conversation_id) next.conversation = job.conversation;
+  if (merged.action === 'research' && isJobFinished(merged.status) && (merged.result || state.conversation?.result)) next.action = 'chat';
+  if (merged.status === 'failed' || merged.status === 'cancelled') next.action = merged.action ?? state.action;
   update(next);
-  restoreRetryDraft(job);
-  if (isJobFinished(job.status) && !refreshedTerminalJobs.has(job.job_id)) {
+  restoreRetryDraft(merged);
+  if (isJobFinished(merged.status) && !refreshedTerminalJobs.has(job.job_id)) {
     refreshedTerminalJobs.add(job.job_id);
     const conversationId = job.conversation_id ?? state.conversationId;
     if (conversationId && conversationId === state.conversationId) void refreshConversation(conversationId);
@@ -172,9 +181,10 @@ function applyJob(job: Job): void {
 async function linkAcceptedJob(job: Job, requestedConversationId: string | null, sequence: number): Promise<void> {
   let summary: ConversationSummary | undefined;
   let conversationId = job.conversation_id ?? job.conversation?.conversation_id ?? requestedConversationId;
+  const request = ++conversationListRequest;
   try {
     const list = await desktopApi().conversations();
-    updateConversationList(list);
+    updateConversationList(list, request);
     if (!conversationId) {
       summary = list.find(item => item.job_id === job.job_id);
       conversationId = summary?.conversation_id ?? null;
@@ -182,10 +192,10 @@ async function linkAcceptedJob(job: Job, requestedConversationId: string | null,
       summary = list.find(item => item.conversation_id === conversationId);
     }
   } catch (error) {
-    update({ notice: `任务已提交；刷新会话列表时出错：${errorMessage(error)}` });
+    if (sequence === selectionSequence && request === conversationListRequest) update({ notice: `任务已提交；刷新会话列表时出错：${errorMessage(error)}` });
   }
   if (!conversationId) {
-    update({ notice: `任务 ${job.job_id} 已提交。服务尚未返回会话标识；可从最近会话刷新查看，请勿重复提交。` });
+    if (sequence === selectionSequence) update({ notice: `任务 ${job.job_id} 已提交。服务尚未返回会话标识；可从最近会话刷新查看，请勿重复提交。` });
     return;
   }
   if (sequence !== selectionSequence || (requestedConversationId && state.conversationId !== requestedConversationId)) return;
@@ -210,7 +220,7 @@ async function linkAcceptedJob(job: Job, requestedConversationId: string | null,
           ...(job.action === 'research' ? { resultJob: currentJob } : {}) });
       }
     } catch (error) {
-      update({ notice: `任务已提交，但会话记录暂时无法读取：${errorMessage(error)}` });
+      if (sequence === selectionSequence && state.conversationId === conversationId) update({ notice: `任务已提交，但会话记录暂时无法读取：${errorMessage(error)}` });
     }
   }
   if (!isJobActive(job.status)) applyJob(job);
@@ -228,6 +238,7 @@ export const workspaceStore = {
     const generation = ++initializationGeneration;
     initialization = (async () => {
       update({ bootStatus: 'loading', error: null });
+      const listRequest = ++conversationListRequest;
       const outcomes = await Promise.allSettled([
         Promise.resolve().then(() => desktopApi().info()),
         Promise.resolve().then(() => desktopApi().config()),
@@ -240,9 +251,9 @@ export const workspaceStore = {
       if (config.status === 'fulfilled') {
         update({ config: config.value, topK: config.value.default_top_k, executionMode: requestedExecutionMode(config.value.default_execution_mode) });
       } else failures.push(errorMessage(config.reason));
-      if (conversations.status === 'fulfilled') updateConversationList(conversations.value); else failures.push(errorMessage(conversations.reason));
+      if (conversations.status === 'fulfilled') updateConversationList(conversations.value, listRequest); else failures.push(errorMessage(conversations.reason));
       update({ bootStatus: failures.length === outcomes.length ? 'error' : 'ready', error: failures.length ? failures.join('；') : null });
-      if (conversations.status === 'fulfilled' && conversations.value.length) {
+      if (conversations.status === 'fulfilled' && conversations.value.length && selectionSequence === 0 && listRequest === conversationListRequest) {
         await this.selectConversation(orderedConversations(conversations.value)[0].conversation_id);
       }
     })().finally(() => {
@@ -341,7 +352,7 @@ export const workspaceStore = {
         mode: 'live',
       });
     } catch (error) {
-      update({ sending: false, error: errorMessage(error) });
+      update({ sending: false, ...(sequence === selectionSequence ? { error: errorMessage(error) } : {}) });
       throw error;
     }
     const returnedConversationId = job.conversation_id ?? job.conversation?.conversation_id ?? requestedConversationId;
@@ -349,11 +360,7 @@ export const workspaceStore = {
     submittedByJob.set(job.job_id, { text: trimmed, draftKey: acceptedDraftKey, action });
     if (submittedByJob.size > 40) submittedByJob.delete(submittedByJob.keys().next().value as string);
     if (sequence !== selectionSequence) {
-      update({
-        sending: false,
-        error: null,
-        notice: `任务 ${job.job_id} 已在后台提交；切换会话不会取消它。`,
-      });
+      update({ sending: false });
       return job;
     }
     update({
@@ -377,7 +384,7 @@ export const workspaceStore = {
       applyJob(job);
       return job;
     } catch (error) {
-      update({ error: errorMessage(error) });
+      if (state.activeJob?.job_id === jobId) update({ error: errorMessage(error) });
       throw error;
     }
   },
