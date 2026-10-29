@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Eye, EyeOff, FolderOpen, LoaderCircle, LockKeyhole, Save, ShieldCheck, Trash2 } from 'lucide-react';
-import type { ConfigUpdate, PublicConfig } from '../../../types/contracts';
+import type { PublicConfig } from '../../../types/contracts';
 import { desktopApi } from '../../../services/desktopApi';
 import { useWorkspaceState, workspaceStore } from '../../../stores/workspaceStore';
+import { deepSeekDraftError, settingsUpdateFor, type SettingsSection } from '../../../utils/settingsSave';
 
 export function SettingsPanel() {
   const { config, serviceInfo } = useWorkspaceState();
@@ -21,54 +22,59 @@ export function SettingsPanel() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [showOpenAlexKey, setShowOpenAlexKey] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ section: SettingsSection; message: string } | null>(null);
+  const lastSavedSection = useRef<SettingsSection | null>(null);
+  const saveInFlight = useRef(false);
 
   useEffect(() => {
     if (!config) return;
-    setBaseUrl(config.base_url);
-    setModel(config.model);
-    setProxy(config.http_proxy);
-    setTopK(config.default_top_k);
-    setConcurrency(config.concurrency);
-    setLlmTimeout(config.llm_timeout);
-    setHttpTimeout(config.http_timeout);
-    setThinking(config.thinking_enabled);
-    setApiKey('');
-    setOpenAlexKey('');
-    setClearApiKey(false);
-    setClearOpenAlexKey(false);
+    const ownSave = lastSavedSection.current;
+    lastSavedSection.current = null;
+    // Saving OpenAlex must not discard pending DeepSeek edits, and vice versa.
+    if (ownSave !== 'openalex') {
+      setBaseUrl(config.base_url);
+      setModel(config.model);
+      setProxy(config.http_proxy);
+      setTopK(config.default_top_k);
+      setConcurrency(config.concurrency);
+      setLlmTimeout(config.llm_timeout);
+      setHttpTimeout(config.http_timeout);
+      setThinking(config.thinking_enabled);
+      setApiKey('');
+      setClearApiKey(false);
+    }
+    if (ownSave !== 'deepseek') {
+      setOpenAlexKey('');
+      setClearOpenAlexKey(false);
+    }
   }, [config]);
 
-  const save = async (event: React.FormEvent<HTMLFormElement>) => {
+  const save = async (event: React.FormEvent<HTMLFormElement>, section: SettingsSection) => {
     event.preventDefault();
-    if (!baseUrl.trim() || !model.trim()) {
-      setError('请填写 API Base URL 和模型名称。');
+    if (saveInFlight.current) return;
+    const draft = {
+      baseUrl, model, proxy, topK, concurrency, llmTimeout, httpTimeout, thinking,
+      apiKey, openAlexKey, clearApiKey, clearOpenAlexKey,
+    };
+    const validationError = section === 'deepseek' ? deepSeekDraftError(draft) : null;
+    if (validationError) {
+      setError({ section, message: validationError });
       return;
     }
+    const values = settingsUpdateFor(section, draft);
+    // An empty OpenAlex form has nothing to save; don't refresh the other form.
+    if (section === 'openalex' && !Object.keys(values).length) return;
+    saveInFlight.current = true;
     setSaving(true);
     setError(null);
-    const values: ConfigUpdate = {
-      base_url: baseUrl.trim(),
-      model: model.trim(),
-      http_proxy: proxy.trim(),
-      default_top_k: topK,
-      concurrency,
-      llm_timeout: llmTimeout,
-      http_timeout: httpTimeout,
-      thinking_enabled: thinking,
-      ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
-      ...(openAlexKey.trim() ? { openalex_api_key: openAlexKey.trim() } : {}),
-      ...(clearApiKey ? { clear_api_key: true } : {}),
-      ...(clearOpenAlexKey ? { clear_openalex_api_key: true } : {}),
-    };
     try {
       const next: PublicConfig = await desktopApi().saveConfig(values);
+      lastSavedSection.current = section;
       workspaceStore.updateConfig(next);
-      setApiKey('');
-      setOpenAlexKey('');
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError({ section, message: reason instanceof Error ? reason.message : String(reason) });
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
     }
   };
@@ -88,7 +94,7 @@ export function SettingsPanel() {
     <p className="panel-subtitle">保存连接参数不会验证密钥，也不会启动研究任务。</p>
     <section className="settings-section">
       <div className="settings-section-head"><div><h3>DeepSeek</h3><p>研究与讨论使用的模型服务。</p></div><span className={`configured-pill ${config.api_key_configured ? 'is-ready' : ''}`}><i/>{config.api_key_configured ? '已配置' : '待配置'}</span></div>
-      <form className="settings-form" onSubmit={event => void save(event)}>
+      <form className="settings-form" onSubmit={event => void save(event, 'deepseek')}>
         <label className="field"><span>API Base URL</span><input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} autoComplete="url"/></label>
         <label className="field"><span>模型名称</span><input value={model} onChange={event => setModel(event.target.value)} placeholder="例如 deepseek-flash"/></label>
         <label className="field"><span>API Key <small>{config.api_key_configured ? '已保存，留空则保留' : '尚未配置'}</small></span><span className="secret-field"><input type={showApiKey ? 'text' : 'password'} value={apiKey} onChange={event => { setApiKey(event.target.value); if (event.target.value) setClearApiKey(false); }} autoComplete="new-password" placeholder="输入新密钥"/><button type="button" className="field-icon" aria-label={showApiKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowApiKey(value => !value)}>{showApiKey ? <EyeOff size={15}/> : <Eye size={15}/>}</button></span></label>
@@ -101,16 +107,17 @@ export function SettingsPanel() {
           <label className="field"><span>模型超时（秒）</span><input type="number" min={5} max={600} value={llmTimeout} onChange={event => setLlmTimeout(Number(event.target.value))}/></label>
           <label className="field"><span>HTTP 超时（秒）</span><input type="number" min={5} max={300} value={httpTimeout} onChange={event => setHttpTimeout(Number(event.target.value))}/></label>
         </div>
-        {error && <div className="inline-error" role="alert">{error}</div>}
+        {error?.section === 'deepseek' && <div className="inline-error" role="alert">{error.message}</div>}
         <button className="primary-button save-settings" type="submit" disabled={saving}>{saving ? <LoaderCircle size={15} className="spin"/> : <Save size={15}/>}保存 DeepSeek 设置</button>
       </form>
     </section>
     <section className="settings-section">
       <div className="settings-section-head"><div><h3>OpenAlex</h3><p>用于学术元数据检索的独立凭据。</p></div><span className={`configured-pill ${config.openalex_api_key_configured ? 'is-ready' : ''}`}><i/>{config.openalex_api_key_configured ? '已配置' : '待配置'}</span></div>
-      <form className="settings-form" onSubmit={event => void save(event)}>
+      <form className="settings-form" onSubmit={event => void save(event, 'openalex')}>
         <label className="field"><span>OpenAlex API Key <small>{config.openalex_api_key_configured ? '已保存，留空则保留' : '尚未配置'}</small></span><span className="secret-field"><input type={showOpenAlexKey ? 'text' : 'password'} value={openAlexKey} onChange={event => { setOpenAlexKey(event.target.value); if (event.target.value) setClearOpenAlexKey(false); }} autoComplete="new-password" placeholder="输入新密钥"/><button type="button" className="field-icon" aria-label={showOpenAlexKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowOpenAlexKey(value => !value)}>{showOpenAlexKey ? <EyeOff size={15}/> : <Eye size={15}/>}</button></span></label>
         <label className="clear-key"><input type="checkbox" checked={clearOpenAlexKey} onChange={event => { setClearOpenAlexKey(event.target.checked); if (event.target.checked) setOpenAlexKey(''); }}/><Trash2 size={14}/>明确清除已保存的 OpenAlex Key</label>
-        <button className="secondary-button" type="submit" disabled={saving}>{saving ? <LoaderCircle size={14} className="spin"/> : <Check size={14}/>}保存 OpenAlex 设置</button>
+        {error?.section === 'openalex' && <div className="inline-error" role="alert">{error.message}</div>}
+        <button className="secondary-button" type="submit" disabled={saving || (!openAlexKey.trim() && !clearOpenAlexKey)}>{saving ? <LoaderCircle size={14} className="spin"/> : <Check size={14}/>}保存 OpenAlex 设置</button>
       </form>
     </section>
     <section className="settings-section settings-service">
